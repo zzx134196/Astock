@@ -215,10 +215,8 @@ tbody tr { cursor:pointer; }
       <div class="tab-btn" onclick="switchStockTab('techind',this)">技术指标</div>
     </div>
     <div id="stockKline" class="tab-content active">
-      <div class="grid2">
-        <div class="card"><h3>日K线 & 均线</h3><canvas id="klineChart"></canvas></div>
-        <div class="card"><h3>成交量</h3><canvas id="volChart"></canvas></div>
-      </div>
+      <div class="card" style="margin-bottom:12px"><h3>日K线 & 均线</h3><div style="position:relative"><canvas id="klineCanvas" style="width:100%;height:340px"></canvas></div></div>
+      <div class="card" style="margin-bottom:12px"><h3>成交量</h3><canvas id="volChart"></canvas></div>
       <div class="grid2">
         <div class="card"><h3>MACD</h3><canvas id="macdChart"></canvas></div>
         <div class="card"><h3>KDJ</h3><canvas id="kdjChart"></canvas></div>
@@ -563,16 +561,8 @@ function renderKline(data){
   const indicators=data.indicators||[];
   const labels=quotes.map(q=>q.date.slice(5,10));
 
-  // Price + MA
-  const datasets=[
-    {label:'收盘价',data:quotes.map(q=>q.close),borderColor:'#e63946',borderWidth:1.5,pointRadius:0,tension:0.1},
-  ];
-  if(indicators.length===quotes.length){
-    datasets.push({label:'MA5',data:indicators.map(d=>d.ma5||null),borderColor:'#4361ee',borderWidth:1,pointRadius:0,tension:0.3});
-    datasets.push({label:'MA10',data:indicators.map(d=>d.ma10||null),borderColor:'#f77f00',borderWidth:1,pointRadius:0,tension:0.3});
-    datasets.push({label:'MA20',data:indicators.map(d=>d.ma20||null),borderColor:'#7209b7',borderWidth:1,pointRadius:0,tension:0.3});
-  }
-  makeChart('klineChart',{type:'line',data:{labels,datasets},options:chartOpts()});
+  // Candlestick via Canvas 2D
+  drawCandlestick('klineCanvas', quotes, indicators);
 
   // Volume
   const vColors=quotes.map(q=>q.pct_chg>=0?'rgba(230,57,70,0.5)':'rgba(46,196,182,0.5)');
@@ -596,6 +586,139 @@ function renderKline(data){
       {label:'J',data:indicators.map(d=>d.j),borderColor:'#7209b7',borderWidth:1.5,pointRadius:0,tension:0.3},
     ]},options:chartOpts()});
   }
+}
+
+function drawCandlestick(canvasId, quotes, indicators) {
+  const canvas = document.getElementById(canvasId);
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const W = rect.width;
+  const H = 340;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const n = quotes.length;
+  if (n === 0) return;
+
+  const pad = {top: 20, right: 60, bottom: 30, left: 10};
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top - pad.bottom;
+
+  // Price range
+  let minP = Infinity, maxP = -Infinity;
+  quotes.forEach(q => { if(q.low < minP) minP = q.low; if(q.high > maxP) maxP = q.high; });
+  if (indicators.length === n) {
+    indicators.forEach(d => {
+      [d.ma5, d.ma10, d.ma20].forEach(v => { if(v && v > 0) { if(v < minP) minP = v; if(v > maxP) maxP = v; }});
+    });
+  }
+  const pRange = maxP - minP || 1;
+  const pPad = pRange * 0.05;
+  minP -= pPad; maxP += pPad;
+
+  const toY = p => pad.top + ch * (1 - (p - minP) / (maxP - minP));
+  const barW = Math.max(1, (cw / n) * 0.7);
+  const gap = cw / n;
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+  ctx.lineWidth = 1;
+  const gridN = 5;
+  for (let i = 0; i <= gridN; i++) {
+    const p = minP + (maxP - minP) * i / gridN;
+    const y = toY(p);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+    ctx.fillStyle = '#a0a8bf'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(p.toFixed(2), W - pad.right + 45, y + 3);
+  }
+
+  // X labels
+  ctx.fillStyle = '#a0a8bf'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  const labelStep = Math.max(1, Math.floor(n / 12));
+  for (let i = 0; i < n; i += labelStep) {
+    const x = pad.left + i * gap + gap / 2;
+    ctx.fillText(quotes[i].date.slice(5, 10), x, H - 8);
+  }
+
+  // Candles
+  const upColor = '#e63946';
+  const downColor = '#2ec4b6';
+  for (let i = 0; i < n; i++) {
+    const q = quotes[i];
+    const x = pad.left + i * gap + gap / 2;
+    const isUp = q.close >= q.open;
+    const color = isUp ? upColor : downColor;
+
+    // Shadow (wick)
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, toY(q.high));
+    ctx.lineTo(x, toY(q.low));
+    ctx.stroke();
+
+    // Body
+    const oY = toY(q.open);
+    const cY = toY(q.close);
+    const bodyH = Math.max(1, Math.abs(cY - oY));
+    const bodyTop = Math.min(oY, cY);
+
+    if (isUp) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - barW/2, bodyTop, barW, bodyH);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x - barW/2 + 0.5, bodyTop + 0.5, barW - 1, bodyH - 1);
+    } else {
+      ctx.fillStyle = color;
+      ctx.fillRect(x - barW/2, bodyTop, barW, bodyH);
+    }
+  }
+
+  // MA lines
+  const maLines = [
+    {key: 'ma5', color: '#4361ee', label: 'MA5'},
+    {key: 'ma10', color: '#f77f00', label: 'MA10'},
+    {key: 'ma20', color: '#7209b7', label: 'MA20'},
+  ];
+  if (indicators.length === n) {
+    maLines.forEach(ma => {
+      ctx.strokeStyle = ma.color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        const v = indicators[i][ma.key];
+        if (!v || v <= 0) { started = false; continue; }
+        const x = pad.left + i * gap + gap / 2;
+        const y = toY(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+      }
+      ctx.stroke();
+    });
+
+    // Legend
+    let lx = pad.left + 5;
+    maLines.forEach(ma => {
+      ctx.fillStyle = ma.color; ctx.font = 'bold 10px sans-serif';
+      ctx.fillRect(lx, 6, 14, 3); lx += 16;
+      ctx.fillText(ma.label, lx, 11); lx += 36;
+    });
+  }
+
+  // Tooltip on hover
+  canvas.onmousemove = function(e) {
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const idx = Math.floor((mx - pad.left) / gap);
+    if (idx < 0 || idx >= n) { canvas.title = ''; return; }
+    const q = quotes[idx];
+    canvas.title = q.date.slice(0,10) + '\\n开:' + q.open.toFixed(2) + ' 高:' + q.high.toFixed(2) + ' 低:' + q.low.toFixed(2) + ' 收:' + q.close.toFixed(2) + '\\n涨幅:' + q.pct_chg.toFixed(2) + '% 成交:' + (q.amount/1e8).toFixed(2) + '亿';
+  };
 }
 
 function renderStockFlow(data){
