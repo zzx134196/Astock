@@ -26,13 +26,13 @@ func (c *Collector) calculateZTFromKline(ctx context.Context) error {
 	startDate, _ := time.Parse("20060102", c.cfg.DataSource.HistoryStartDate)
 	endDate := time.Now()
 
-	stocks, err := c.store.GetMainBoardStocks(ctx)
+	stocks, err := c.store.GetAllStocks(ctx)
 	if err != nil {
 		return fmt.Errorf("获取股票列表失败: %w", err)
 	}
 
 	total := len(stocks)
-	log.Printf("[采集] 正在计算 %d 只主板股票的涨停记录...", total)
+	log.Printf("[采集] 正在计算 %d 只股票的涨停记录...", total)
 
 	allRecords := make([]model.ZTRecord, 0)
 

@@ -11,7 +11,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/config.yaml", "配置文件路径")
-	addr := flag.String("addr", ":8099", "监听地址")
+	addr := flag.String("addr", ":8088", "监听地址")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)

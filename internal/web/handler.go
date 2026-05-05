@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"astock/internal/config"
@@ -40,8 +41,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/hot", s.handleHotRank)
 	s.mux.HandleFunc("/api/lhb", s.handleLHB)
 	s.mux.HandleFunc("/api/flow/top", s.handleFlowTop)
+	s.mux.HandleFunc("/api/flow/dates", s.handleFlowDates)
 	s.mux.HandleFunc("/api/stats", s.handleDBStats)
 	s.mux.HandleFunc("/api/stock", s.handleStockDetail)
+	s.mux.HandleFunc("/api/stock/search", s.handleStockSearch)
+	s.mux.HandleFunc("/api/stock/flow", s.handleStockFlow)
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -90,9 +94,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	overview := map[string]interface{}{
-		"date":       date.Format("2006-01-02"),
-		"zt_count":   len(zt),
-		"analysis":   analysis,
+		"date":     date.Format("2006-01-02"),
+		"zt_count": len(zt),
+		"analysis": analysis,
 	}
 
 	jsonResponse(w, overview)
@@ -130,7 +134,11 @@ func (s *Server) handleZTHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSentiment(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
+	daysStr := r.URL.Query().Get("days")
 	days := 60
+	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 365 {
+		days = d
+	}
 	end := latestTradeDate()
 	start := end.AddDate(0, 0, -days)
 
@@ -351,7 +359,7 @@ func (s *Server) handleFlowTop(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.store.DB().QueryContext(ctx,
 		`SELECT f.code, s.name, f.main_net, f.huge_net, f.big_net
 		 FROM stock_flow f LEFT JOIN stocks s ON f.code = s.code
-		 WHERE f.date = $1 AND (f.code LIKE '60%' OR f.code LIKE '00%')
+		 WHERE f.date = $1
 		 ORDER BY f.main_net DESC LIMIT 30`, date)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -372,7 +380,7 @@ func (s *Server) handleFlowTop(w http.ResponseWriter, r *http.Request) {
 	rows2, _ := s.store.DB().QueryContext(ctx,
 		`SELECT f.code, s.name, f.main_net, f.huge_net, f.big_net
 		 FROM stock_flow f LEFT JOIN stocks s ON f.code = s.code
-		 WHERE f.date = $1 AND (f.code LIKE '60%' OR f.code LIKE '00%')
+		 WHERE f.date = $1
 		 ORDER BY f.main_net ASC LIMIT 30`, date)
 	if rows2 != nil {
 		defer rows2.Close()
@@ -393,11 +401,30 @@ func (s *Server) handleFlowTop(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"date": date.Format("2006-01-02"), "inflows": inflows, "outflows": outflows})
 }
 
+func (s *Server) handleFlowDates(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT DISTINCT date FROM stock_flow ORDER BY date DESC LIMIT 120`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var dates []string
+	for rows.Next() {
+		var d time.Time
+		rows.Scan(&d)
+		dates = append(dates, d.Format("2006-01-02"))
+	}
+	jsonResponse(w, dates)
+}
+
 func (s *Server) handleDBStats(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	tables := []string{"stocks", "daily_quotes", "stock_indicators", "zt_records", "zt_premium",
 		"daily_sentiment", "sectors", "sector_flow", "stock_flow", "lhb_records", "lhb_detail",
-		"hot_rank", "stock_changes", "stock_concepts", "strategy_signals", "trade_records"}
+		"hot_rank", "stock_changes", "stock_concepts", "strategy_signals", "trade_records", "zt_pool_ext"}
 
 	var stats []map[string]interface{}
 	for _, t := range tables {
@@ -416,18 +443,134 @@ func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	monthsStr := r.URL.Query().Get("months")
+	months := 6
+	if m, err := strconv.Atoi(monthsStr); err == nil && m > 0 && m <= 24 {
+		months = m
+	}
+
 	end := latestTradeDate()
-	start := end.AddDate(0, -3, 0)
+	start := end.AddDate(0, -months, 0)
+
+	// 获取股票基本信息
+	var stockName, market, industry string
+	var isST bool
+	s.store.DB().QueryRowContext(ctx,
+		`SELECT name, market, industry, is_st FROM stocks WHERE code=$1`, code).Scan(&stockName, &market, &industry, &isST)
 
 	quotes, _ := s.store.GetDailyQuotes(ctx, code, start, end)
 	ztRecords, _ := s.store.GetZTRecordsByCode(ctx, code, start, end)
 	indicators, _ := s.store.GetIndicators(ctx, code, start, end)
 	concepts, _ := s.store.GetStockConcepts(ctx, code)
 
+	// 资金流向
+	flowRows, _ := s.store.DB().QueryContext(ctx,
+		`SELECT date, main_net, huge_net, big_net, mid_net, small_net
+		 FROM stock_flow WHERE code=$1 AND date>=$2 AND date<=$3 ORDER BY date`, code, start, end)
+
+	var flows []map[string]interface{}
+	if flowRows != nil {
+		defer flowRows.Close()
+		for flowRows.Next() {
+			var d time.Time
+			var mn, hn, bn, midn, sn float64
+			flowRows.Scan(&d, &mn, &hn, &bn, &midn, &sn)
+			flows = append(flows, map[string]interface{}{
+				"date": d.Format("2006-01-02"), "main_net": mn, "huge_net": hn,
+				"big_net": bn, "mid_net": midn, "small_net": sn,
+			})
+		}
+	}
+
+	// 龙虎榜
+	lhbRows, _ := s.store.DB().QueryContext(ctx,
+		`SELECT date, net_amount, buy_amount, sell_amount, reason
+		 FROM lhb_records WHERE code=$1 AND date>=$2 AND date<=$3 ORDER BY date DESC`, code, start, end)
+
+	var lhbRecords []map[string]interface{}
+	if lhbRows != nil {
+		defer lhbRows.Close()
+		for lhbRows.Next() {
+			var d time.Time
+			var na, ba, sa float64
+			var reason string
+			lhbRows.Scan(&d, &na, &ba, &sa, &reason)
+			lhbRecords = append(lhbRecords, map[string]interface{}{
+				"date": d.Format("2006-01-02"), "net_amount": na,
+				"buy_amount": ba, "sell_amount": sa, "reason": reason,
+			})
+		}
+	}
+
 	jsonResponse(w, map[string]interface{}{
-		"code": code, "quotes": quotes, "zt_records": ztRecords,
+		"code": code, "name": stockName, "market": market,
+		"industry": industry, "is_st": isST,
+		"quotes": quotes, "zt_records": ztRecords,
 		"indicators": indicators, "concepts": concepts,
+		"flows": flows, "lhb": lhbRecords,
 	})
+}
+
+func (s *Server) handleStockSearch(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		jsonResponse(w, []interface{}{})
+		return
+	}
+
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT code, name, market, industry FROM stocks
+		 WHERE code LIKE $1 OR name LIKE $2
+		 ORDER BY code LIMIT 20`, q+"%", "%"+q+"%")
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var code, name, market, industry string
+		rows.Scan(&code, &name, &market, &industry)
+		results = append(results, map[string]interface{}{
+			"code": code, "name": name, "market": market, "industry": industry,
+		})
+	}
+	jsonResponse(w, results)
+}
+
+func (s *Server) handleStockFlow(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "缺少code参数", 400)
+		return
+	}
+
+	end := latestTradeDate()
+	start := end.AddDate(0, -3, 0)
+
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT date, main_net, huge_net, big_net, mid_net, small_net
+		 FROM stock_flow WHERE code=$1 AND date>=$2 AND date<=$3 ORDER BY date`, code, start, end)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var flows []map[string]interface{}
+	for rows.Next() {
+		var d time.Time
+		var mn, hn, bn, midn, sn float64
+		rows.Scan(&d, &mn, &hn, &bn, &midn, &sn)
+		flows = append(flows, map[string]interface{}{
+			"date": d.Format("2006-01-02"), "main_net": mn, "huge_net": hn,
+			"big_net": bn, "mid_net": midn, "small_net": sn,
+		})
+	}
+	jsonResponse(w, flows)
 }
 
 func Start(s *store.Store, cfg *config.Config, addr string) {

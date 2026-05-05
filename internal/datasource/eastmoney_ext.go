@@ -452,22 +452,22 @@ func (e *EastMoney) FetchStockChanges() ([]model.StockChange, error) {
 
 // FetchZTPoolStrong 获取强势股池
 func (e *EastMoney) FetchZTPoolStrong(date string) ([]model.ZTPoolExt, error) {
-	return e.fetchPoolExt(date, "strong", "getTopicQSPool")
+	return e.fetchPoolExt(date, "强势股池", "getTopicQSPool")
 }
 
 // FetchZTPoolFail 获取炸板股池
 func (e *EastMoney) FetchZTPoolFail(date string) ([]model.ZTPoolExt, error) {
-	return e.fetchPoolExt(date, "fail", "getTopicZBPool")
+	return e.fetchPoolExt(date, "炸板股池", "getTopicZBPool")
 }
 
 // FetchZTPoolDT 获取跌停股池
 func (e *EastMoney) FetchZTPoolDT(date string) ([]model.ZTPoolExt, error) {
-	return e.fetchPoolExt(date, "dt", "getTopicDTPool")
+	return e.fetchPoolExt(date, "跌停股池", "getTopicDTPool")
 }
 
 // FetchZTPoolSubNew 获取次新股池
 func (e *EastMoney) FetchZTPoolSubNew(date string) ([]model.ZTPoolExt, error) {
-	return e.fetchPoolExt(date, "sub_new", "getTopicCXPool")
+	return e.fetchPoolExt(date, "次新股池", "getTopicCXPool")
 }
 
 func (e *EastMoney) fetchPoolExt(date, poolType, endpoint string) ([]model.ZTPoolExt, error) {

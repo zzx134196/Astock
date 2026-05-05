@@ -11,13 +11,13 @@ import (
 
 // CalculateIndicators 为所有主板股票计算技术指标
 func (a *Analyzer) CalculateIndicators(ctx context.Context) error {
-	stocks, err := a.store.GetMainBoardStocks(ctx)
+	stocks, err := a.store.GetAllStocks(ctx)
 	if err != nil {
 		return fmt.Errorf("获取股票列表失败: %w", err)
 	}
 
 	total := len(stocks)
-	log.Printf("[指标] 开始计算 %d 只主板股票的技术指标...", total)
+	log.Printf("[指标] 开始计算 %d 只股票的技术指标...", total)
 
 	for i, stock := range stocks {
 		select {

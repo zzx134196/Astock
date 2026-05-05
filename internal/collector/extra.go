@@ -6,15 +6,15 @@ import (
 	"time"
 )
 
-// CollectStockConcepts 采集所有主板股票的所属板块/概念标签
+// CollectStockConcepts 采集所有股票的所属板块/概念标签
 func (c *Collector) CollectStockConcepts(ctx context.Context) error {
-	stocks, err := c.store.GetMainBoardStocks(ctx)
+	stocks, err := c.store.GetAllStocks(ctx)
 	if err != nil {
 		return err
 	}
 
 	total := len(stocks)
-	log.Printf("[采集] 开始采集 %d 只主板股票的概念标签...", total)
+	log.Printf("[采集] 开始采集 %d 只股票的概念标签...", total)
 
 	totalConcepts := 0
 	for i, stock := range stocks {

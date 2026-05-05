@@ -145,9 +145,9 @@ func (c *Collector) CollectStockFlow(ctx context.Context) error {
 	}
 	log.Printf("[采集] 个股当日资金流向: %d 条", len(flows))
 
-	// 历史资金流向（主板股票，约120个交易日）
+	// 历史资金流向（全市场股票，约120个交易日）
 	log.Println("[采集] 开始采集个股历史资金流向...")
-	stocks, err := c.store.GetMainBoardStocks(ctx)
+	stocks, err := c.store.GetAllStocks(ctx)
 	if err != nil {
 		return err
 	}

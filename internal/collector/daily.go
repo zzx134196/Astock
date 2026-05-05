@@ -8,7 +8,7 @@ import (
 )
 
 func (c *Collector) CollectDailyQuotes(ctx context.Context) error {
-	stocks, err := c.store.GetMainBoardStocks(ctx)
+	stocks, err := c.store.GetAllStocks(ctx)
 	if err != nil {
 		return fmt.Errorf("获取股票列表失败: %w", err)
 	}
@@ -21,7 +21,7 @@ func (c *Collector) CollectDailyQuotes(ctx context.Context) error {
 	startDate := c.cfg.DataSource.HistoryStartDate
 
 	total := len(stocks)
-	log.Printf("[采集] 开始采集 %d 只主板股票的日K线数据 (%s ~ %s)", total, startDate, endDate)
+	log.Printf("[采集] 开始采集 %d 只股票的日K线数据 (%s ~ %s)", total, startDate, endDate)
 
 	for i, stock := range stocks {
 		select {

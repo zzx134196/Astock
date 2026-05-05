@@ -15,13 +15,13 @@ func (c *Collector) CollectStockList(ctx context.Context) error {
 
 	log.Printf("[采集] 获取到 %d 只股票", len(stocks))
 
-	mainBoard := make([]struct{}, 0)
+	mainBoard := 0
 	for _, s := range stocks {
 		if s.IsMainBoard() {
-			mainBoard = append(mainBoard, struct{}{})
+			mainBoard++
 		}
 	}
-	log.Printf("[采集] 其中主板 %d 只", len(mainBoard))
+	log.Printf("[采集] 其中主板 %d 只，创业板/科创板/北交所等 %d 只", mainBoard, len(stocks)-mainBoard)
 
 	if err := c.store.UpsertStocks(ctx, stocks); err != nil {
 		return err
