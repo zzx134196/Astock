@@ -38,6 +38,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/backtest", s.handleBacktestResult)
 	s.mux.HandleFunc("/api/premium", s.handlePremiumStats)
 	s.mux.HandleFunc("/api/hot", s.handleHotRank)
+	s.mux.HandleFunc("/api/lhb", s.handleLHB)
+	s.mux.HandleFunc("/api/flow/top", s.handleFlowTop)
+	s.mux.HandleFunc("/api/stats", s.handleDBStats)
+	s.mux.HandleFunc("/api/stock", s.handleStockDetail)
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -304,6 +308,126 @@ func (s *Server) handleHotRank(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, ranks)
+}
+
+func (s *Server) handleLHB(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	date := getDateParam(r, "date")
+	if date.IsZero() {
+		date = latestTradeDate()
+	}
+
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT l.code, l.name, l.pct_chg, l.close, l.net_amount, l.buy_amount, l.sell_amount, l.turnover, l.reason
+		 FROM lhb_records l WHERE l.date = $1 ORDER BY l.net_amount DESC`, date)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var records []map[string]interface{}
+	for rows.Next() {
+		var code, name, reason string
+		var pctChg, close, netAmt, buyAmt, sellAmt, turnover float64
+		rows.Scan(&code, &name, &pctChg, &close, &netAmt, &buyAmt, &sellAmt, &turnover, &reason)
+		records = append(records, map[string]interface{}{
+			"code": code, "name": name, "pct_chg": pctChg, "close": close,
+			"net_amount": netAmt, "buy_amount": buyAmt, "sell_amount": sellAmt,
+			"turnover": turnover, "reason": reason,
+		})
+	}
+
+	jsonResponse(w, map[string]interface{}{"date": date.Format("2006-01-02"), "count": len(records), "records": records})
+}
+
+func (s *Server) handleFlowTop(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	date := getDateParam(r, "date")
+	if date.IsZero() {
+		date = latestTradeDate()
+	}
+
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT f.code, s.name, f.main_net, f.huge_net, f.big_net
+		 FROM stock_flow f LEFT JOIN stocks s ON f.code = s.code
+		 WHERE f.date = $1 AND (f.code LIKE '60%' OR f.code LIKE '00%')
+		 ORDER BY f.main_net DESC LIMIT 30`, date)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var inflows []map[string]interface{}
+	for rows.Next() {
+		var code, name string
+		var mainNet, hugeNet, bigNet float64
+		rows.Scan(&code, &name, &mainNet, &hugeNet, &bigNet)
+		inflows = append(inflows, map[string]interface{}{
+			"code": code, "name": name, "main_net": mainNet, "huge_net": hugeNet, "big_net": bigNet,
+		})
+	}
+
+	rows2, _ := s.store.DB().QueryContext(ctx,
+		`SELECT f.code, s.name, f.main_net, f.huge_net, f.big_net
+		 FROM stock_flow f LEFT JOIN stocks s ON f.code = s.code
+		 WHERE f.date = $1 AND (f.code LIKE '60%' OR f.code LIKE '00%')
+		 ORDER BY f.main_net ASC LIMIT 30`, date)
+	if rows2 != nil {
+		defer rows2.Close()
+	}
+
+	var outflows []map[string]interface{}
+	if rows2 != nil {
+		for rows2.Next() {
+			var code, name string
+			var mainNet, hugeNet, bigNet float64
+			rows2.Scan(&code, &name, &mainNet, &hugeNet, &bigNet)
+			outflows = append(outflows, map[string]interface{}{
+				"code": code, "name": name, "main_net": mainNet, "huge_net": hugeNet, "big_net": bigNet,
+			})
+		}
+	}
+
+	jsonResponse(w, map[string]interface{}{"date": date.Format("2006-01-02"), "inflows": inflows, "outflows": outflows})
+}
+
+func (s *Server) handleDBStats(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	tables := []string{"stocks", "daily_quotes", "stock_indicators", "zt_records", "zt_premium",
+		"daily_sentiment", "sectors", "sector_flow", "stock_flow", "lhb_records", "lhb_detail",
+		"hot_rank", "stock_changes", "stock_concepts", "strategy_signals", "trade_records"}
+
+	var stats []map[string]interface{}
+	for _, t := range tables {
+		var count int
+		s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM "+t).Scan(&count)
+		stats = append(stats, map[string]interface{}{"table": t, "count": count})
+	}
+	jsonResponse(w, stats)
+}
+
+func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "缺少code参数", 400)
+		return
+	}
+
+	end := latestTradeDate()
+	start := end.AddDate(0, -3, 0)
+
+	quotes, _ := s.store.GetDailyQuotes(ctx, code, start, end)
+	ztRecords, _ := s.store.GetZTRecordsByCode(ctx, code, start, end)
+	indicators, _ := s.store.GetIndicators(ctx, code, start, end)
+	concepts, _ := s.store.GetStockConcepts(ctx, code)
+
+	jsonResponse(w, map[string]interface{}{
+		"code": code, "quotes": quotes, "zt_records": ztRecords,
+		"indicators": indicators, "concepts": concepts,
+	})
 }
 
 func Start(s *store.Store, cfg *config.Config, addr string) {
