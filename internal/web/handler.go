@@ -672,7 +672,8 @@ func (s *Server) handleBacktestRun(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 
 	levelStr := r.URL.Query().Get("level")
-	daysStr := r.URL.Query().Get("days")
+	startStr := r.URL.Query().Get("start_date")
+	endStr := r.URL.Query().Get("end_date")
 	maxStr := r.URL.Query().Get("max_picks")
 	buyAllStr := r.URL.Query().Get("buy_all")
 
@@ -688,10 +689,15 @@ func (s *Server) handleBacktestRun(w http.ResponseWriter, r *http.Request) {
 		level = strategy.FilterC
 	}
 
-	days := 200
-	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 730 {
-		days = d
+	endDate := time.Now()
+	startDate := endDate.AddDate(0, 0, -200)
+	if t, err := time.Parse("2006-01-02", startStr); err == nil {
+		startDate = t
 	}
+	if t, err := time.Parse("2006-01-02", endStr); err == nil {
+		endDate = t
+	}
+
 	maxPicks := 3
 	if m, err := strconv.Atoi(maxStr); err == nil && m > 0 {
 		maxPicks = m
@@ -702,8 +708,8 @@ func (s *Server) handleBacktestRun(w http.ResponseWriter, r *http.Request) {
 	defer strategy.SetResultWriter(io.Discard)
 
 	cfg := strategy.BacktestConfig{
-		StartDate:   time.Now().AddDate(0, 0, -days),
-		EndDate:     time.Now(),
+		StartDate:   startDate,
+		EndDate:     endDate,
 		MaxPicks:    maxPicks,
 		FilterLevel: level,
 		BuyAll:      buyAll,

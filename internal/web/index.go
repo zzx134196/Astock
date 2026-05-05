@@ -281,8 +281,12 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
               </select>
             </div>
             <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:10px;color:var(--text3)">回测天数</label>
-              <input id="btDays" type="number" value="200" min="30" max="730" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;width:80px;font-size:12px">
+              <label style="font-size:10px;color:var(--text3)">开始日期</label>
+              <input id="btStartDate" type="date" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;width:140px;font-size:12px">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:10px;color:var(--text3)">结束日期</label>
+              <input id="btEndDate" type="date" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;width:140px;font-size:12px">
             </div>
             <div style="display:flex;flex-direction:column;gap:4px">
               <label style="font-size:10px;color:var(--text3)">每日选股数</label>
@@ -538,11 +542,12 @@ async function runBacktest(){
   document.getElementById('btRunLoading').style.display='block';
   document.getElementById('btRunResult').style.display='none';
   const level=document.getElementById('btLevel').value;
-  const days=document.getElementById('btDays').value;
+  const startDate=document.getElementById('btStartDate').value;
+  const endDate=document.getElementById('btEndDate').value;
   const picks=document.getElementById('btPicks').value;
   const buyAll=document.getElementById('btBuyAll').checked;
   try{
-    const data=await api('/api/backtest/run?level='+level+'&days='+days+'&max_picks='+picks+'&buy_all='+(buyAll?'true':'false'));
+    const data=await api('/api/backtest/run?level='+level+'&start_date='+startDate+'&end_date='+endDate+'&max_picks='+picks+'&buy_all='+(buyAll?'true':'false'));
     if(!data||!data.summary){document.getElementById('btRunLoading').innerHTML='<div class="empty">回测无结果</div>';return;}
     const s=data.summary;
     document.getElementById('btRunCards').innerHTML=[
@@ -661,7 +666,13 @@ function drawCandlestick(cid,quotes,indicators){
 function co(){return{responsive:true,plugins:{legend:{labels:{color:'#94a3b8',font:{size:10,family:'Inter'},boxWidth:10}},tooltip:{mode:'index',intersect:false,backgroundColor:'rgba(30,41,59,0.9)',titleFont:{size:11},bodyFont:{size:11},padding:8,cornerRadius:8}},scales:{x:ao(),y:ao()},interaction:{mode:'index',intersect:false}};}
 function ao(){return{ticks:{color:'#94a3b8',font:{size:9,family:'Inter'},maxRotation:0},grid:{color:'rgba(0,0,0,0.03)'}};}
 
-(async()=>{await loadOverview();loadSentiment();initZTDates();loadPremium();initLHBDates();initFlowDates();loadSignals();loadHotRank();loadBacktest();loadDBStats();})();
+(async()=>{
+  const today=new Date();const fmt=d=>d.toISOString().slice(0,10);
+  document.getElementById('btEndDate').value=fmt(today);
+  const start=new Date(today);start.setDate(start.getDate()-365);
+  document.getElementById('btStartDate').value=fmt(start);
+  await loadOverview();loadSentiment();initZTDates();loadPremium();initLHBDates();initFlowDates();loadSignals();loadHotRank();loadBacktest();loadDBStats();
+})();
 </script>
 </body>
 </html>` + ""
