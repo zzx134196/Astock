@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"sort"
 	"time"
 
@@ -73,46 +75,51 @@ func main() {
 			log.Fatalf("情绪明细计算失败: %v", err)
 		}
 	case "backtest":
-		log.Println("=== 策略回测（无未来数据版） ===")
-		log.Println("逻辑: T日涨停选股 → T+1开盘买入 → 盘中冲高卖出")
-		startDate, _ := time.Parse("20060102", cfg.DataSource.HistoryStartDate)
+		log.Println("=== 选股验证 v7（晋级概率导向） ===")
+		log.Println("结果输出到 backtest_result.txt")
+		startDate := time.Now().AddDate(0, 0, -200)
 
-		// 冲高2%卖出（最优策略：胜率79%, 27/28月盈利）
-		bt1 := strategy.NewBacktester(db, strategy.BacktestConfig{
-			StartDate: startDate, EndDate: time.Now(),
-			MaxPicks: 2, HoldDays: 1,
-			InitialCapital: 1000000, PositionPct: 50,
-			MinZTCount: 30, RushPct: 2.0, Verbose: true,
-		})
-		if _, err := bt1.Run(ctx); err != nil {
-			log.Fatalf("回测失败: %v", err)
+		f, err := os.Create("backtest_result.txt")
+		if err != nil {
+			log.Fatalf("创建结果文件失败: %v", err)
+		}
+		defer f.Close()
+		strategy.SetResultWriter(f)
+
+		fmt.Fprintln(f, "=== 选股验证 v7（晋级概率导向, 近200天） ===")
+		fmt.Fprintln(f, "逻辑: T-1日涨停 → T日开盘排除一字板 → 评分Top N → 看T日/T+1日收益+晋级率")
+		fmt.Fprintln(f, "")
+
+		levels := []struct {
+			name   string
+			level  strategy.FilterLevel
+			buyAll bool
+		}{
+			{"S级(2板+量比<0.8+涨3) Top3", strategy.FilterS, false},
+			{"S级(2板+量比<0.8+涨3) 全买", strategy.FilterS, true},
+			{"A级(2板+量比<0.8+涨2) Top3", strategy.FilterA, false},
+			{"A级(2板+量比<0.8+涨2) 全买", strategy.FilterA, true},
+			{"B级(量比<0.8+涨2) Top3", strategy.FilterB, false},
+			{"C级(量比<1.0+涨2) Top3", strategy.FilterC, false},
 		}
 
-		log.Println("")
-
-		// 对比：冲高3%卖出
-		bt2 := strategy.NewBacktester(db, strategy.BacktestConfig{
-			StartDate: startDate, EndDate: time.Now(),
-			MaxPicks: 2, HoldDays: 1,
-			InitialCapital: 1000000, PositionPct: 50,
-			MinZTCount: 30, RushPct: 3.0,
-		})
-		if _, err := bt2.Run(ctx); err != nil {
-			log.Fatalf("回测失败: %v", err)
+		for _, lv := range levels {
+			fmt.Fprintf(f, "\n========== %s ==========\n", lv.name)
+			bt := strategy.NewBacktester(db, strategy.BacktestConfig{
+				StartDate:   startDate,
+				EndDate:     time.Now(),
+				MaxPicks:    3,
+				MinZTCount:  30,
+				FilterLevel: lv.level,
+				BuyAll:      lv.buyAll,
+				Verbose:     true,
+			})
+			if _, err := bt.Run(ctx); err != nil {
+				log.Printf("回测 %s 失败: %v", lv.name, err)
+			}
 		}
 
-		log.Println("")
-
-		// 对比：收盘卖出（不设冲高）
-		bt3 := strategy.NewBacktester(db, strategy.BacktestConfig{
-			StartDate: startDate, EndDate: time.Now(),
-			MaxPicks: 2, HoldDays: 1,
-			InitialCapital: 1000000, PositionPct: 50,
-			MinZTCount: 30, RushPct: 0,
-		})
-		if _, err := bt3.Run(ctx); err != nil {
-			log.Fatalf("回测失败: %v", err)
-		}
+		log.Println("结果已写入 backtest_result.txt")
 
 	case "sweep":
 		log.Println("=== 参数扫描 ===")
@@ -168,6 +175,7 @@ func main() {
 				pr.rush, pr.hold, pr.picks, pr.trades, pr.winRate, pr.pnl, pr.dd, pr.sharpe)
 		}
 		log.Println("================================================")
+
 	case "all":
 		log.Println("=== 全面分析 ===")
 		if err := a.AnalyzeAll(ctx); err != nil {

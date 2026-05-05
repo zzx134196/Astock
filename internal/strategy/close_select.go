@@ -66,16 +66,13 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 		if !passBaseFilter(zt) {
 			continue
 		}
-		// 排除一字板（换手<3%排不到）
-		if zt.Turnover > 0 && zt.Turnover < 3 {
+
+		sc := BuildScoreContext(ctx, s.store, zt, analysis, sectorCount[zt.Industry])
+
+		if !PassGridFilter(zt, sc.Indicator) {
 			continue
 		}
 
-		sc := ScoreContext{
-			ZT:            zt,
-			Analysis:      analysis,
-			SectorZTCount: sectorCount[zt.Industry],
-		}
 		score := ScoreCandidateV3(sc)
 
 		reason := buildCloseReason(zt, analysis, sectorCount[zt.Industry])
