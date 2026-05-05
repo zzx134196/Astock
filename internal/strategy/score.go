@@ -206,6 +206,17 @@ func ScorePromoV7(sc ScoreContext) float64 {
 		score += 5
 	}
 
+	// 11. 成交额加分（2-3板中额>=5亿T日+0.64% vs <3亿-0.08%）
+	if sc.ZT.BoardCount >= 2 && sc.ZT.BoardCount <= 3 {
+		if sc.ZT.Amount >= 500000000 {
+			score += 6
+		} else if sc.ZT.Amount >= 300000000 {
+			score += 2
+		} else {
+			score -= 3
+		}
+	}
+
 	return score
 }
 

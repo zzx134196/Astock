@@ -253,6 +253,7 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
       <div class="sub-tabs" id="stratSubTabs">
         <div class="sub-tab active" onclick="stratTab('signals',this)">选股信号</div>
         <div class="sub-tab" onclick="stratTab('backtest',this)">回测报告</div>
+        <div class="sub-tab" onclick="stratTab('btrun',this)">回测验证</div>
         <div class="sub-tab" onclick="stratTab('params',this)">策略参数</div>
       </div>
 
@@ -264,6 +265,46 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
         <div class="grid4" id="btCards"></div>
         <div class="glass" style="margin-bottom:12px"><h3><span class="dot"></span>累计收益曲线</h3><canvas id="btCurveChart"></canvas></div>
         <div class="glass"><h3><span class="dot"></span>交易明细</h3><div class="table-wrap" id="btTradesTable"></div></div>
+      </div>
+
+      <div id="s_btrun" class="sub-content">
+        <div class="glass" style="margin-bottom:12px">
+          <h3><span class="dot"></span>回测参数</h3>
+          <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:10px">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:10px;color:var(--text3)">过滤级别</label>
+              <select id="btLevel" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;background:white;font-size:12px;min-width:180px">
+                <option value="S">S - 2板+量比&lt;0.8+涨3</option>
+                <option value="A" selected>A - 2板+量比&lt;0.8+涨2</option>
+                <option value="B">B - 量比&lt;0.8+涨2</option>
+                <option value="C">C - 量比&lt;1.0+涨2</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:10px;color:var(--text3)">回测天数</label>
+              <input id="btDays" type="number" value="200" min="30" max="730" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;width:80px;font-size:12px">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <label style="font-size:10px;color:var(--text3)">每日选股数</label>
+              <input id="btPicks" type="number" value="3" min="1" max="20" style="padding:6px 10px;border:1px solid rgba(0,0,0,0.1);border-radius:8px;width:80px;font-size:12px">
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;padding:6px 0">
+              <input id="btBuyAll" type="checkbox"><label for="btBuyAll" style="font-size:12px;color:var(--text2);cursor:pointer">全买(不限数量)</label>
+            </div>
+            <button id="btRunBtn" onclick="runBacktest()" style="padding:8px 20px;background:linear-gradient(135deg,var(--blue),var(--purple));color:white;border:none;border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s;box-shadow:0 2px 8px rgba(59,130,246,0.3)">运行回测</button>
+          </div>
+        </div>
+        <div id="btRunLoading" style="display:none;text-align:center;padding:40px;color:var(--text3)">
+          <div style="font-size:24px;margin-bottom:8px">&#8987;</div>
+          <div>正在运行回测，请稍等...</div>
+        </div>
+        <div id="btRunResult" style="display:none">
+          <div class="grid4" id="btRunCards" style="margin-bottom:12px"></div>
+          <div class="glass" style="margin-bottom:12px">
+            <h3><span class="dot"></span>每日选股明细 <span id="btRunTradeCount" style="font-weight:400;color:var(--text3);font-size:10px;margin-left:4px"></span></h3>
+            <div id="btRunDaily" class="table-wrap"></div>
+          </div>
+        </div>
       </div>
 
       <div id="s_params" class="sub-content">
@@ -282,6 +323,19 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
             </ul>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- K线弹窗 -->
+    <div id="klineModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;backdrop-filter:blur(4px)">
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--card);border-radius:16px;width:90%;max-width:800px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.2);padding:20px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div id="klineModalTitle" style="font-size:15px;font-weight:700"></div>
+          <button onclick="closeKlineModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text3);padding:4px 8px;border-radius:8px">&times;</button>
+        </div>
+        <canvas id="klineModalCanvas" style="width:100%;height:280px"></canvas>
+        <canvas id="klineModalVol" style="width:100%;height:80px;margin-top:4px"></canvas>
+        <div id="klineModalInfo" style="margin-top:12px;font-size:11px;color:var(--text2)"></div>
       </div>
     </div>
 
@@ -477,6 +531,79 @@ async function loadBacktest(){const data=await api('/api/backtest');
   if(data.trades&&data.trades.length){let h='<table><thead><tr><th>日期</th><th>代码</th><th>名称</th><th>买入</th><th>卖出</th><th>盈亏%</th></tr></thead><tbody>';data.trades.slice(-50).reverse().forEach(t=>{h+='<tr onclick="openStock(\''+t.code+'\')"><td>'+t.buy_date+'</td><td><b>'+t.code+'</b></td><td>'+t.name+'</td><td>'+f(t.buy_price,2)+'</td><td>'+f(t.sell_price,2)+'</td><td class="'+cls(t.pnl_pct)+'"><b>'+f(t.pnl_pct,2)+'%</b></td></tr>';});
     h+='</tbody></table>';document.getElementById('btTradesTable').innerHTML=h;}else{document.getElementById('btTradesTable').innerHTML='<div class="empty">暂无回测交易记录</div>';}}
 async function loadDBStats(){const data=await api('/api/stats');let h='<table><thead><tr><th>数据表</th><th>记录数</th></tr></thead><tbody>';let total=0;(data||[]).forEach(r=>{total+=r.count;h+='<tr><td>'+r.table+'</td><td><b>'+Number(r.count).toLocaleString()+'</b></td></tr>';});h+='<tr style="background:rgba(0,0,0,0.02)"><td><b>总计</b></td><td><b style="color:var(--emerald)">'+total.toLocaleString()+'</b></td></tr></tbody></table>';document.getElementById('dbStatsTable').innerHTML=h;}
+
+// === 回测验证 ===
+async function runBacktest(){
+  const btn=document.getElementById('btRunBtn');btn.disabled=true;btn.textContent='运行中...';
+  document.getElementById('btRunLoading').style.display='block';
+  document.getElementById('btRunResult').style.display='none';
+  const level=document.getElementById('btLevel').value;
+  const days=document.getElementById('btDays').value;
+  const picks=document.getElementById('btPicks').value;
+  const buyAll=document.getElementById('btBuyAll').checked;
+  try{
+    const data=await api('/api/backtest/run?level='+level+'&days='+days+'&max_picks='+picks+'&buy_all='+(buyAll?'true':'false'));
+    if(!data||!data.summary){document.getElementById('btRunLoading').innerHTML='<div class="empty">回测无结果</div>';return;}
+    const s=data.summary;
+    document.getElementById('btRunCards').innerHTML=[
+      statCard('交易笔数',s.total_trades||0,'跳过一字板:'+s.skip_zt,''),
+      statCard('T日收益',f(s.t_day_pnl,3)+'%','胜率:'+f(s.t_day_win_rate,1)+'%',s.t_day_pnl>0?'up':'down'),
+      statCard('T+1收益',f(s.t1_day_pnl,3)+'%','胜率:'+f(s.t1_day_win_rate,1)+'%',s.t1_day_pnl>0?'up':'down'),
+      statCard('晋级率',f(s.promo_rate,1)+'%','晋级:'+s.promo_count+'笔',s.promo_rate>35?'up':''),
+      statCard('最大盈利','+'+f(s.max_win,2)+'%','','up'),
+      statCard('最大亏损',f(s.max_loss,2)+'%','','down')
+    ].join('');
+    document.getElementById('btRunTradeCount').textContent='共'+s.total_trades+'笔 / '+s.total_days+'天';
+    const trades=data.trades||[];
+    const daily=data.daily||{};
+    const dates=Object.keys(daily).sort().reverse();
+    let h='';
+    dates.forEach(date=>{
+      const dayTrades=daily[date];
+      const dayPnl=dayTrades.reduce((a,t)=>a+(t.t_day_pnl||0),0)/dayTrades.length;
+      h+='<div style="margin-bottom:12px"><div style="font-weight:600;font-size:12px;color:var(--text);padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.06)">'+date+' <span style="font-size:10px;color:var(--text3);margin-left:6px">'+dayTrades.length+'只</span><span style="font-size:11px;margin-left:8px" class="'+cls(dayPnl)+'">T日均:'+f(dayPnl,2)+'%</span></div>';
+      h+='<table style="margin-top:4px"><thead><tr><th>股票</th><th>评分</th><th>原因</th><th>T日收益</th><th>T+1收益</th><th>晋级</th><th>K线</th></tr></thead><tbody>';
+      dayTrades.forEach(t=>{
+        const promoTag=t.promoted?'<span class="tag tag-red" style="font-size:9px">★晋级</span>':'';
+        h+='<tr><td><b style="cursor:pointer;color:var(--blue)" onclick="openStock(\''+t.code+'\')">'+t.name+'</b> <span style="color:var(--text3);font-size:10px">'+t.code+'</span></td>';
+        h+='<td>'+f(t.score,0)+'</td>';
+        h+='<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px">'+t.reason+'</td>';
+        h+='<td class="'+cls(t.t_day_pnl)+'"><b>'+f(t.t_day_pnl,2)+'%</b></td>';
+        h+='<td class="'+cls(t.t1_day_pnl)+'"><b>'+f(t.t1_day_pnl,2)+'%</b></td>';
+        h+='<td>'+promoTag+'</td>';
+        h+='<td><a onclick="showKline(\''+t.code+'\',\''+t.name+'\',\''+date+'\')" style="cursor:pointer;font-size:11px">K线</a></td></tr>';
+      });
+      h+='</tbody></table></div>';
+    });
+    document.getElementById('btRunDaily').innerHTML=h||'<div class="empty">无选股记录</div>';
+    document.getElementById('btRunResult').style.display='block';
+  }catch(e){document.getElementById('btRunLoading').innerHTML='<div class="empty">回测出错: '+e.message+'</div>';}
+  finally{btn.disabled=false;btn.textContent='运行回测';document.getElementById('btRunLoading').style.display='none';}
+}
+
+// === K线弹窗 ===
+async function showKline(code,name,date){
+  document.getElementById('klineModal').style.display='block';
+  document.getElementById('klineModalTitle').textContent=name+' ('+code+') - K线走势';
+  document.getElementById('klineModalInfo').textContent='加载中...';
+  try{
+    const data=await api('/api/stock?code='+code+'&months=6');
+    if(!data||!data.quotes||!data.quotes.length){document.getElementById('klineModalInfo').textContent='无K线数据';return;}
+    drawCandlestick('klineModalCanvas',data.quotes,data.indicators||[]);
+    const quotes=data.quotes;const labels=quotes.map(q=>q.date.slice(5,10));
+    const vColors=quotes.map(q=>q.pct_chg>=0?'rgba(239,68,68,0.35)':'rgba(16,185,129,0.35)');
+    makeChart('klineModalVol',{type:'bar',data:{labels,datasets:[{label:'成交量',data:quotes.map(q=>q.volume),backgroundColor:vColors,borderRadius:1}]},options:co()});
+    const last=quotes[quotes.length-1];
+    let info='最新: '+f(last.close,2)+' | 涨幅:'+f(last.pct_chg,2)+'%';
+    if(date){
+      const buyQ=quotes.find(q=>q.date&&q.date.slice(0,10)===date);
+      if(buyQ) info+=' | 选股日开盘:'+f(buyQ.open,2)+' 收盘:'+f(buyQ.close,2)+' 涨幅:'+f(buyQ.pct_chg,2)+'%';
+    }
+    document.getElementById('klineModalInfo').textContent=info;
+  }catch(e){document.getElementById('klineModalInfo').textContent='加载失败: '+e.message;}
+}
+function closeKlineModal(){document.getElementById('klineModal').style.display='none';}
+document.getElementById('klineModal').onclick=function(e){if(e.target===this)closeKlineModal();};
 
 // === Stock Detail ===
 async function loadStockDetail(code){

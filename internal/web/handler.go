@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"astock/internal/config"
 	"astock/internal/store"
+	"astock/internal/strategy"
 )
 
 type Server struct {
@@ -48,6 +51,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/stock", s.handleStockDetail)
 	s.mux.HandleFunc("/api/stock/search", s.handleStockSearch)
 	s.mux.HandleFunc("/api/stock/flow", s.handleStockFlow)
+	s.mux.HandleFunc("/api/backtest/run", s.handleBacktestRun)
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -662,6 +666,94 @@ func (s *Server) handleStockFlow(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	jsonResponse(w, flows)
+}
+
+func (s *Server) handleBacktestRun(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+
+	levelStr := r.URL.Query().Get("level")
+	daysStr := r.URL.Query().Get("days")
+	maxStr := r.URL.Query().Get("max_picks")
+	buyAllStr := r.URL.Query().Get("buy_all")
+
+	level := strategy.FilterA
+	switch strings.ToUpper(levelStr) {
+	case "S":
+		level = strategy.FilterS
+	case "A":
+		level = strategy.FilterA
+	case "B":
+		level = strategy.FilterB
+	case "C":
+		level = strategy.FilterC
+	}
+
+	days := 200
+	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 730 {
+		days = d
+	}
+	maxPicks := 3
+	if m, err := strconv.Atoi(maxStr); err == nil && m > 0 {
+		maxPicks = m
+	}
+	buyAll := buyAllStr == "true" || buyAllStr == "1"
+
+	strategy.SetResultWriter(io.Discard)
+	defer strategy.SetResultWriter(io.Discard)
+
+	cfg := strategy.BacktestConfig{
+		StartDate:   time.Now().AddDate(0, 0, -days),
+		EndDate:     time.Now(),
+		MaxPicks:    maxPicks,
+		FilterLevel: level,
+		BuyAll:      buyAll,
+		Verbose:     true,
+	}
+	bt := strategy.NewBacktester(s.store, cfg)
+	result, err := bt.Run(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("回测失败: %v", err), 500)
+		return
+	}
+
+	daily := make(map[string][]map[string]interface{})
+	var trades []map[string]interface{}
+	for _, t := range result.Trades {
+		dateStr := t.BuyDate.Format("2006-01-02")
+		tr := map[string]interface{}{
+			"date":      dateStr,
+			"code":      t.Code,
+			"name":      t.Name,
+			"buy_price": t.BuyPrice,
+			"t_day_pnl": t.TDayPnl,
+			"t1_day_pnl": t.T1DayPnl,
+			"score":     t.Score,
+			"reason":    t.Reason,
+			"promoted":  t.Promoted,
+		}
+		trades = append(trades, tr)
+		daily[dateStr] = append(daily[dateStr], tr)
+	}
+
+	summary := map[string]interface{}{
+		"total_trades":   result.TotalTrades,
+		"t_day_pnl":     result.AvgTDayPnl,
+		"t_day_win_rate": result.TDayWinRate,
+		"t1_day_pnl":    result.AvgT1DayPnl,
+		"t1_day_win_rate": result.T1DayWinRate,
+		"promo_rate":    result.PromoRate,
+		"promo_count":   result.PromoCount,
+		"max_win":       result.MaxWin,
+		"max_loss":      result.MaxLoss,
+		"skip_zt":       result.SkipZTBuy,
+		"total_days":    result.TotalDays,
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"summary": summary,
+		"trades":  trades,
+		"daily":   daily,
+	})
 }
 
 func Start(s *store.Store, cfg *config.Config, addr string) {
