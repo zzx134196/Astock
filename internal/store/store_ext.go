@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"astock/internal/model"
 )
@@ -144,6 +145,18 @@ func (s *Store) UpsertStockFlows(ctx context.Context, flows []model.StockFlow) e
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) GetStockFlowByCodeDate(ctx context.Context, code string, date time.Time) (*model.StockFlow, error) {
+	var f model.StockFlow
+	err := s.db.QueryRowContext(ctx,
+		`SELECT code, date, main_net, huge_net, big_net, mid_net, small_net
+		 FROM stock_flow WHERE code=$1 AND date=$2`, code, date).Scan(
+		&f.Code, &f.Date, &f.MainNet, &f.HugeNet, &f.BigNet, &f.MidNet, &f.SmallNet)
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // ==================== stock_changes ====================

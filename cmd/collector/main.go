@@ -68,6 +68,11 @@ func main() {
 		if err := c.CollectZTRecords(ctx); err != nil {
 			log.Fatalf("采集涨停数据失败: %v", err)
 		}
+	case "bid":
+		log.Println("=== 开始采集竞价数据 ===")
+		if err := c.CollectBidData(ctx); err != nil {
+			log.Fatalf("采集竞价数据失败: %v", err)
+		}
 	case "lhb":
 		log.Println("=== 开始采集龙虎榜数据 ===")
 		if err := c.CollectLHB(ctx); err != nil {

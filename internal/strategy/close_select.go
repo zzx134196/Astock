@@ -51,20 +51,19 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 		}
 	}
 
-	// 对每只涨停股评分
+	// 对每只涨停股评分（使用V2多维度评分）
 	var candidates []Signal
 	for _, zt := range todayZT {
-		// 过滤条件
 		if !passCloseFilter(zt) {
 			continue
 		}
 
-		sc := sectorCount[zt.Industry]
-		score := ScoreCandidate(zt, analysis, sc)
+		sc := BuildScoreContext(ctx, s.store, zt, analysis, sectorCount[zt.Industry])
+		score := ScoreCandidateV2(sc)
 
 		stopLossPrice := zt.Close * (1 - s.cfg.Strategy.DefaultStopLoss/100)
 
-		reason := buildCloseReason(zt, analysis, sc)
+		reason := buildCloseReason(zt, analysis, sectorCount[zt.Industry])
 
 		candidates = append(candidates, Signal{
 			Code:       zt.Code,

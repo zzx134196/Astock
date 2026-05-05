@@ -11,6 +11,7 @@ import (
 )
 
 // CollectBidData 采集竞价数据（需在9:25之后调用）
+// 采集昨日涨停股 + 当日人气股的竞价数据
 func (c *Collector) CollectBidData(ctx context.Context) error {
 	today := time.Now()
 	if today.Weekday() == time.Saturday || today.Weekday() == time.Sunday {
@@ -18,7 +19,14 @@ func (c *Collector) CollectBidData(ctx context.Context) error {
 		return nil
 	}
 
-	yesterday := today.AddDate(0, 0, -1)
+	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local)
+
+	// 获取昨日涨停记录
+	yesterday := todayDate.AddDate(0, 0, -1)
+	for yesterday.Weekday() == time.Saturday || yesterday.Weekday() == time.Sunday {
+		yesterday = yesterday.AddDate(0, 0, -1)
+	}
+
 	records, err := c.store.GetZTRecordsByDate(ctx, yesterday)
 	if err != nil {
 		return fmt.Errorf("获取昨日涨停记录失败: %w", err)
@@ -51,7 +59,6 @@ func (c *Collector) CollectBidData(ctx context.Context) error {
 
 		data, err := c.em.FetchRealtimeQuote(secID)
 		if err != nil {
-			log.Printf("[竞价] 获取 %s 实时数据失败: %v", r.Code, err)
 			c.em.Sleep()
 			continue
 		}
@@ -73,7 +80,7 @@ func (c *Collector) CollectBidData(ctx context.Context) error {
 
 		bidList = append(bidList, model.BidData{
 			Code:      r.Code,
-			Date:      today,
+			Date:      todayDate,
 			BidPrice:  price,
 			BidVolume: volume,
 			BidAmount: amount,
@@ -84,8 +91,39 @@ func (c *Collector) CollectBidData(ctx context.Context) error {
 		c.em.Sleep()
 	}
 
+	if len(bidList) > 0 {
+		if err := c.storeBidData(ctx, bidList); err != nil {
+			return err
+		}
+	}
+
 	log.Printf("[竞价] 采集完成，共 %d 条数据", len(bidList))
 	return nil
+}
+
+func (c *Collector) storeBidData(ctx context.Context, bids []model.BidData) error {
+	tx, err := c.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO bid_data (code, date, bid_price, bid_volume, bid_amount, bid_pct_chg, pre_close)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (code, date) DO UPDATE SET
+			bid_price=EXCLUDED.bid_price, bid_volume=EXCLUDED.bid_volume,
+			bid_amount=EXCLUDED.bid_amount, bid_pct_chg=EXCLUDED.bid_pct_chg, pre_close=EXCLUDED.pre_close`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, b := range bids {
+		if _, err := stmt.ExecContext(ctx, b.Code, b.Date, b.BidPrice, b.BidVolume, b.BidAmount, b.BidPctChg, b.PreClose); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func getFloat(m map[string]interface{}, key string) float64 {
