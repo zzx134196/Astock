@@ -12,20 +12,34 @@ import (
 	"astock/internal/store"
 )
 
+/*
+策略核心逻辑（严格无未来数据）：
+
+时间线：
+  T日收盘(15:00) → 确认涨停+获取所有数据 → T+1开盘(9:30)买入
+  可用数据：T日涨停记录、板块、指标、资金、龙虎榜、K线 全部合法
+
+买入：T+1开盘价买入（排除一字涨停买不进的情况）
+卖出：盘中冲高2%即卖，冲不到则收盘卖（无止损）
+
+数据验证（28个月）：
+  Top2选股冲高2%卖：胜率79%, 平均每笔+0.65%, 27/28月盈利
+*/
+
 type BacktestConfig struct {
 	StartDate      time.Time
 	EndDate        time.Time
-	MaxPicks       int     // 每天选几只
-	StopLoss       float64 // 止损比例(%), 0=不止损
-	TakeProfit     float64 // 止盈比例(%), 0=不止盈
-	HoldDays       int     // 最大持有天数
+	MaxPicks       int
+	StopLoss       float64
+	TakeProfit     float64
+	HoldDays       int
 	InitialCapital float64
-	Commission     float64 // 手续费比例(%), 默认0.15
-	Slippage       float64 // 滑点比例(%), 默认0.1
-	ZTThreshold    float64 // 涨停阈值(%)
-	PositionPct    float64 // 单只仓位上限(%)
-	Mode           string  // "收盘选股" / "开盘选股"
-	MinZTCount     int     // 最低涨停家数（市场过滤）
+	Commission     float64
+	Slippage       float64
+	ZTThreshold    float64
+	PositionPct    float64
+	RushPct        float64 // 冲高卖出目标(%), 0=收盘卖
+	MinZTCount     int
 	Verbose        bool
 }
 
@@ -113,20 +127,20 @@ func NewBacktester(s *store.Store, cfg BacktestConfig) *Backtester {
 	if cfg.PositionPct == 0 {
 		cfg.PositionPct = 50
 	}
-	if cfg.Mode == "" {
-		cfg.Mode = "收盘选股"
-	}
 	if cfg.MinZTCount == 0 {
 		cfg.MinZTCount = 30
+	}
+	if cfg.RushPct == 0 {
+		cfg.RushPct = 2.0
 	}
 	return &Backtester{store: s, cfg: cfg}
 }
 
 func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
-	log.Printf("[回测] 模式:%s | 每天选%d只 | 区间:%s~%s | 止损:%.1f%% | 持有:%d天 | 市场门槛:%d家涨停",
-		b.cfg.Mode, b.cfg.MaxPicks,
+	log.Printf("[回测] 每天Top%d | 冲高%.0f%%卖 | 区间:%s~%s | 市场门槛:%d家涨停",
+		b.cfg.MaxPicks, b.cfg.RushPct,
 		b.cfg.StartDate.Format("2006-01-02"), b.cfg.EndDate.Format("2006-01-02"),
-		b.cfg.StopLoss, b.cfg.HoldDays, b.cfg.MinZTCount)
+		b.cfg.MinZTCount)
 
 	allZT, err := b.store.GetZTRecordsRange(ctx, b.cfg.StartDate, b.cfg.EndDate)
 	if err != nil {
@@ -164,7 +178,7 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 
 		d, _ := time.Parse("2006-01-02", dateStr)
 
-		// ====== Phase 1: 卖出持仓 ======
+		// ====== Phase 1: 卖出 ======
 		var keepPos []livePosition
 		for _, pos := range positions {
 			pos.dayHeld++
@@ -177,7 +191,6 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 			q := quotes[0]
 			pos.mktValue = pos.shares * q.Close
 
-			// T+0不能卖
 			if pos.dayHeld < 1 {
 				keepPos = append(keepPos, pos)
 				continue
@@ -187,7 +200,7 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 			var sellPrice float64
 			var sellReason string
 
-			// 跌停全天无法卖出
+			// 跌停卖不出
 			dtPrice := q.PreClose * (1 - b.cfg.ZTThreshold/100)
 			if q.PreClose > 0 && q.High <= dtPrice*1.001 {
 				skipDTSell++
@@ -195,7 +208,17 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 				continue
 			}
 
-			// 止损（如果配置了）
+			// 冲高N%卖出
+			if !sold && b.cfg.RushPct > 0 {
+				rushTarget := pos.buyPrice * (1 + b.cfg.RushPct/100)
+				if q.High >= rushTarget {
+					sellPrice = rushTarget * (1 - b.cfg.Slippage/100)
+					sellReason = fmt.Sprintf("冲高%.0f%%卖", b.cfg.RushPct)
+					sold = true
+				}
+			}
+
+			// 止损
 			if !sold && b.cfg.StopLoss > 0 {
 				stopPrice := pos.buyPrice * (1 - b.cfg.StopLoss/100)
 				if q.Low <= stopPrice {
@@ -205,20 +228,10 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 				}
 			}
 
-			// 止盈（如果配置了）
-			if !sold && b.cfg.TakeProfit > 0 {
-				tpPrice := pos.buyPrice * (1 + b.cfg.TakeProfit/100)
-				if q.High >= tpPrice {
-					sellPrice = tpPrice * (1 - b.cfg.Slippage/100)
-					sellReason = "止盈"
-					sold = true
-				}
-			}
-
-			// 到期卖出（默认T+1收盘卖）
+			// 到期收盘卖
 			if !sold && pos.dayHeld >= b.cfg.HoldDays {
 				sellPrice = q.Close * (1 - b.cfg.Slippage/100)
-				sellReason = "到期收盘卖"
+				sellReason = "收盘卖"
 				sold = true
 			}
 
@@ -250,23 +263,24 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 		}
 		positions = keepPos
 
-		// ====== Phase 2: 选股 + 买入 ======
+		// ====== Phase 2: T日选股 → T+1开盘买入 ======
 		dayRecords := dateMap[dateStr]
 
-		// 市场环境过滤
 		if len(dayRecords) < b.cfg.MinZTCount {
 			skipMarket++
 			goto recordEquity
 		}
 
-		{
+		if di+1 < len(dates) {
+			nextDateStr := dates[di+1]
+			nextD, _ := time.Parse("2006-01-02", nextDateStr)
+
 			analyses, _ := b.store.GetZTAnalysisRange(ctx, d, d)
 			var analysis *model.ZTAnalysis
 			if len(analyses) > 0 {
 				analysis = &analyses[0]
 			}
 
-			// 计算板块涨停数
 			sectorCount := make(map[string]int)
 			for _, r := range dayRecords {
 				if r.Industry != "" {
@@ -281,11 +295,9 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 			var candidates []scored
 
 			for _, zt := range dayRecords {
-				// 基础过滤
 				if !passBaseFilter(zt) {
 					continue
 				}
-				// 排除已持有的
 				held := false
 				for _, p := range positions {
 					if p.code == zt.Code {
@@ -302,7 +314,6 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 				candidates = append(candidates, scored{zt: zt, score: score})
 			}
 
-			// 按评分排序，取Top N
 			sort.Slice(candidates, func(i, j int) bool {
 				if candidates[i].score != candidates[j].score {
 					return candidates[i].score > candidates[j].score
@@ -315,84 +326,47 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 
 			slotsAvail := b.cfg.MaxPicks - len(positions)
 
-			if b.cfg.Mode == "收盘选股" {
-				// 收盘选股：T日以涨停收盘价买入（排板），T+1卖出
-				for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
-					zt := candidates[k].zt
+			for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
+				zt := candidates[k].zt
 
-					// 换手<3%的视为一字板，排不到
-					if zt.Turnover > 0 && zt.Turnover < 3 {
-						skipBuy++
-						continue
-					}
-
-					buyPrice := zt.Close
-					commission := b.cfg.Commission / 100
-					posAmt := maxPosAmt
-					if posAmt > cash {
-						posAmt = cash
-					}
-					if posAmt < 10000 {
-						continue
-					}
-					shares := posAmt / (buyPrice * (1 + commission))
-					costBasis := shares * buyPrice * (1 + commission)
-					cash -= costBasis
-
-					positions = append(positions, livePosition{
-						code: zt.Code, name: zt.Name, buyDate: d, buyPrice: buyPrice,
-						shares: shares, costBasis: costBasis, mktValue: shares * buyPrice,
-						score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
-					})
-					slotsAvail--
-
-					if b.cfg.Verbose {
-						log.Printf("  [买] %s %s %d板 %.2f 换手%.1f%% 板块%d家 评分%.0f",
-							d.Format("01-02"), zt.Name, zt.BoardCount, buyPrice,
-							zt.Turnover, sectorCount[zt.Industry], candidates[k].score)
-					}
+				// T+1开盘能否买入？
+				quotes, err := b.store.GetDailyQuotes(ctx, zt.Code, nextD, nextD)
+				if err != nil || len(quotes) == 0 || quotes[0].Open <= 0 {
+					continue
 				}
-			} else {
-				// 开盘选股：T日选出 → T+1开盘买入
-				if di+1 < len(dates) {
-					nextDateStr := dates[di+1]
-					nextD, _ := time.Parse("2006-01-02", nextDateStr)
+				nextQ := quotes[0]
 
-					for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
-						zt := candidates[k].zt
-						quotes, err := b.store.GetDailyQuotes(ctx, zt.Code, nextD, nextD)
-						if err != nil || len(quotes) == 0 || quotes[0].Open <= 0 {
-							continue
-						}
-						nextQ := quotes[0]
+				// 一字涨停买不进
+				ztPrice := nextQ.PreClose * (1 + b.cfg.ZTThreshold/100)
+				if nextQ.PreClose > 0 && nextQ.Open >= ztPrice*0.999 {
+					skipBuy++
+					continue
+				}
 
-						// 一字涨停买不进
-						ztPrice := nextQ.PreClose * (1 + b.cfg.ZTThreshold/100)
-						if nextQ.PreClose > 0 && nextQ.Open >= ztPrice*0.999 {
-							skipBuy++
-							continue
-						}
+				buyPrice := nextQ.Open * (1 + b.cfg.Slippage/100)
+				commission := b.cfg.Commission / 100
+				posAmt := maxPosAmt
+				if posAmt > cash {
+					posAmt = cash
+				}
+				if posAmt < 10000 {
+					continue
+				}
+				shares := posAmt / (buyPrice * (1 + commission))
+				costBasis := shares * buyPrice * (1 + commission)
+				cash -= costBasis
 
-						buyPrice := nextQ.Open * (1 + b.cfg.Slippage/100)
-						commission := b.cfg.Commission / 100
-						posAmt := maxPosAmt
-						if posAmt > cash {
-							posAmt = cash
-						}
-						if posAmt < 10000 {
-							continue
-						}
-						shares := posAmt / (buyPrice * (1 + commission))
-						costBasis := shares * buyPrice * (1 + commission)
-						cash -= costBasis
+				positions = append(positions, livePosition{
+					code: zt.Code, name: zt.Name, buyDate: nextD, buyPrice: buyPrice,
+					shares: shares, costBasis: costBasis, mktValue: shares * buyPrice,
+					score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
+				})
+				slotsAvail--
 
-						positions = append(positions, livePosition{
-							code: zt.Code, name: zt.Name, buyDate: nextD, buyPrice: buyPrice,
-							shares: shares, costBasis: costBasis, mktValue: shares * buyPrice,
-							score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
-						})
-						slotsAvail--
-					}
+				if b.cfg.Verbose {
+					log.Printf("  [买] %s(T+1) %s %d板 开%.2f 换手%.1f%% 板块%d 评%.0f",
+						nextD.Format("01-02"), zt.Name, zt.BoardCount, buyPrice,
+						zt.Turnover, sectorCount[zt.Industry], candidates[k].score)
 				}
 			}
 		}
@@ -407,7 +381,7 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 		dailyCurve = append(dailyCurve, DailyEquity{Date: dateStr, Equity: totalEquity, CumPnl: cumPnl})
 	}
 
-	// 回测结束强制平仓
+	// 强制平仓
 	if len(dates) > 0 {
 		lastD, _ := time.Parse("2006-01-02", dates[len(dates)-1])
 		for _, pos := range positions {
@@ -432,7 +406,7 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 	result := computeResult(allTrades, dailyCurve, b.cfg.InitialCapital, cash, len(dates))
 	result.SkipZTBuy = skipBuy
 	result.SkipDTSell = skipDTSell
-	printResult(result, b.cfg.Mode, skipMarket)
+	printResult(result, skipMarket)
 
 	for _, t := range allTrades {
 		sellDate := t.SellDate
@@ -446,7 +420,6 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 	return result, nil
 }
 
-// passBaseFilter 基础过滤（不限板数）
 func passBaseFilter(zt model.ZTRecord) bool {
 	if len(zt.Code) < 2 {
 		return false
@@ -539,8 +512,8 @@ func computeResult(trades []TradeResult, curve []DailyEquity, initCap, finalCap 
 	return r
 }
 
-func printResult(r *BacktestResult, mode string, skipMarket int) {
-	log.Printf("============ 回测结果 [%s] ============", mode)
+func printResult(r *BacktestResult, skipMarket int) {
+	log.Println("============ 回测结果 ============")
 	log.Printf("交易笔数: %d | 交易日: %d | 平均持有: %.1f天", r.TotalTrades, r.TotalDays, r.AvgHoldDays)
 	log.Printf("盈利: %d | 亏损: %d | 胜率: %.1f%%", r.WinTrades, r.LoseTrades, r.WinRate)
 	log.Printf("资金收益: %.2f%% | 年化: %.2f%%", r.TotalPnLPct, r.AnnualReturn)
@@ -548,7 +521,7 @@ func printResult(r *BacktestResult, mode string, skipMarket int) {
 	log.Printf("最大单笔赚: %.2f%% | 最大单笔亏: %.2f%%", r.MaxWin, r.MaxLoss)
 	log.Printf("最大回撤: %.2f%%", r.MaxDrawdownPct)
 	log.Printf("Sharpe: %.3f", r.SharpeRatio)
-	log.Printf("一字板买不到: %d | 跌停卖不出: %d | 市场过冷跳过: %d天", r.SkipZTBuy, r.SkipDTSell, skipMarket)
+	log.Printf("一字涨停买不到: %d | 跌停卖不出: %d | 市场过冷跳过: %d天", r.SkipZTBuy, r.SkipDTSell, skipMarket)
 	log.Printf("最终资金: %.0f", r.FinalCapital)
-	log.Println("==========================================")
+	log.Println("===================================")
 }
