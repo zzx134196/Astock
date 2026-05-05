@@ -15,16 +15,17 @@ import (
 type BacktestConfig struct {
 	StartDate      time.Time
 	EndDate        time.Time
-	MaxPicks       int
+	MaxPicks       int     // 最大同时持仓数
 	StopLoss       float64 // 止损比例(%)
 	TakeProfit     float64 // 止盈比例(%), 0=不止盈
-	HoldDays       int
+	HoldDays       int     // 最大持有天数
 	InitialCapital float64
 	Commission     float64 // 手续费比例(%), 默认0.15
 	Slippage       float64 // 滑点比例(%), 默认0.1
 	ZTThreshold    float64 // 涨停阈值(%)
-	PositionPct    float64 // 单只仓位上限(%), 默认20
-	Mode           string  // "排板" = 涨停价排队买入次日卖, "追板" = 次日开盘买入持有
+	PositionPct    float64 // 单只仓位上限(%)
+	Mode           string  // "排板" / "追板"
+	Verbose        bool    // 是否输出每笔交易
 }
 
 type BacktestResult struct {
@@ -35,6 +36,7 @@ type BacktestResult struct {
 	TotalPnLPct    float64
 	AvgPnLPct      float64
 	MaxDrawdown    float64
+	MaxDrawdownPct float64
 	MaxWin         float64
 	MaxLoss        float64
 	ProfitFactor   float64
@@ -44,6 +46,7 @@ type BacktestResult struct {
 	FinalCapital   float64
 	AnnualReturn   float64
 	TotalDays      int
+	AvgHoldDays    float64
 	Trades         []TradeResult
 	DailyCurve     []DailyEquity
 }
@@ -69,15 +72,17 @@ type DailyEquity struct {
 	CumPnl float64 `json:"cum_pnl"`
 }
 
-type openPosition struct {
+type livePosition struct {
 	code       string
 	name       string
 	buyDate    time.Time
 	buyPrice   float64
-	amount     float64
+	shares     float64 // 实际股数
+	costBasis  float64 // 总成本（含买入手续费）
+	mktValue   float64 // 当前市值
 	score      float64
 	boardCount int
-	dayHeld    int
+	dayHeld    int // T+0=买入当天（不能卖），T+1=第二天（可卖）
 }
 
 type Backtester struct {
@@ -93,7 +98,7 @@ func NewBacktester(s *store.Store, cfg BacktestConfig) *Backtester {
 		cfg.StopLoss = 5
 	}
 	if cfg.HoldDays == 0 {
-		cfg.HoldDays = 1
+		cfg.HoldDays = 2
 	}
 	if cfg.Commission == 0 {
 		cfg.Commission = 0.15
@@ -117,19 +122,10 @@ func NewBacktester(s *store.Store, cfg BacktestConfig) *Backtester {
 }
 
 func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
-	log.Printf("[回测] 模式:%s | 区间:%s~%s | 止损:%.1f%% | 持有:%d天 | 手续费:%.2f%% | 仓位:%.0f%%",
+	log.Printf("[回测] 模式:%s | 区间:%s~%s | 止损:%.1f%% | 止盈:%.0f%% | 持有:%d天 | 手续费:%.2f%% | 仓位:%.0f%%",
 		b.cfg.Mode, b.cfg.StartDate.Format("2006-01-02"), b.cfg.EndDate.Format("2006-01-02"),
-		b.cfg.StopLoss, b.cfg.HoldDays, b.cfg.Commission, b.cfg.PositionPct)
+		b.cfg.StopLoss, b.cfg.TakeProfit, b.cfg.HoldDays, b.cfg.Commission, b.cfg.PositionPct)
 
-	if b.cfg.Mode == "排板" {
-		return b.runBoardQueue(ctx)
-	}
-	return b.runChaseOpen(ctx)
-}
-
-// runBoardQueue 排板策略：T日涨停时以涨停价排队买入 → T+1卖出
-// 核心假设：封单足够大时能排到队（封单/流通市值>2%视为可排到）
-func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error) {
 	allZT, err := b.store.GetZTRecordsRange(ctx, b.cfg.StartDate, b.cfg.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("获取涨停记录失败: %w", err)
@@ -148,13 +144,13 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 
 	log.Printf("[回测] %d 个交易日有涨停数据", len(dates))
 
-	capital := b.cfg.InitialCapital
-	var positions []openPosition
+	cash := b.cfg.InitialCapital
+	maxPosAmt := b.cfg.InitialCapital * b.cfg.PositionPct / 100
+	var positions []livePosition
 	var allTrades []TradeResult
 	var dailyCurve []DailyEquity
-	skipCount := 0
-	// 固定仓位金额，不随资金增长（避免复利夸大）
-	maxPositionAmt := b.cfg.InitialCapital * b.cfg.PositionPct / 100
+	skipBuy := 0
+	skipDTSell := 0
 
 	for di, dateStr := range dates {
 		select {
@@ -165,78 +161,97 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 
 		d, _ := time.Parse("2006-01-02", dateStr)
 
-		// Step 1: 处理已有持仓 → 今日卖出
-		var keepPositions []openPosition
+		// ====== Phase 1: 更新持仓市值 + 卖出判断 ======
+		var keepPos []livePosition
 		for _, pos := range positions {
 			pos.dayHeld++
 
 			quotes, err := b.store.GetDailyQuotes(ctx, pos.code, d, d)
 			if err != nil || len(quotes) == 0 {
-				keepPositions = append(keepPositions, pos)
+				keepPos = append(keepPos, pos)
 				continue
 			}
 			q := quotes[0]
+
+			// 更新市值
+			pos.mktValue = pos.shares * q.Close
+
+			// T+0不能卖（A股T+1制度）
+			if pos.dayHeld < 1 {
+				keepPos = append(keepPos, pos)
+				continue
+			}
 
 			sold := false
 			var sellPrice float64
 			var sellReason string
 
-			// 跌停卖不出
+			// 1) 跌停全天无法卖出
 			dtPrice := q.PreClose * (1 - b.cfg.ZTThreshold/100)
 			if q.PreClose > 0 && q.High <= dtPrice*1.001 {
-				if pos.dayHeld >= b.cfg.HoldDays+1 {
+				skipDTSell++
+				if pos.dayHeld > b.cfg.HoldDays {
 					sellPrice = q.Close
-					sellReason = "到期(跌停)"
+					sellReason = "超期强平(跌停)"
 					sold = true
 				} else {
-					keepPositions = append(keepPositions, pos)
+					keepPos = append(keepPos, pos)
 					continue
 				}
 			}
 
-			if !sold && pos.dayHeld >= b.cfg.HoldDays {
-				// 冲高卖出策略：如果盘中有高于买入价3%的机会则卖出
-				targetSell := pos.buyPrice * 1.03
-				if q.High >= targetSell {
-					sellPrice = targetSell * (1 - b.cfg.Slippage/100)
-					sellReason = "冲高止盈"
-				} else {
-					sellPrice = q.Open * (1 - b.cfg.Slippage/100)
-					sellReason = "开盘卖出"
-				}
-				sold = true
-			}
-
+			// 2) 止损：盘中触及止损价
 			if !sold && b.cfg.StopLoss > 0 {
-				lossLimit := pos.buyPrice * (1 - b.cfg.StopLoss/100)
-				if q.Low <= lossLimit {
-					sellPrice = lossLimit
+				stopPrice := pos.buyPrice * (1 - b.cfg.StopLoss/100)
+				if q.Low <= stopPrice {
+					sellPrice = stopPrice * (1 - b.cfg.Slippage/100)
 					sellReason = "止损"
 					sold = true
 				}
 			}
 
+			// 3) 止盈：盘中触及止盈价
+			if !sold && b.cfg.TakeProfit > 0 {
+				tpPrice := pos.buyPrice * (1 + b.cfg.TakeProfit/100)
+				if q.High >= tpPrice {
+					sellPrice = tpPrice * (1 - b.cfg.Slippage/100)
+					sellReason = "止盈"
+					sold = true
+				}
+			}
+
+			// 4) 到期卖出
+			if !sold && pos.dayHeld >= b.cfg.HoldDays {
+				sellPrice = q.Close * (1 - b.cfg.Slippage/100)
+				sellReason = "到期"
+				sold = true
+			}
+
 			if sold && sellPrice > 0 {
 				commission := b.cfg.Commission / 100
-				shares := pos.amount / (pos.buyPrice * (1 + commission))
-				sellProceeds := shares * sellPrice * (1 - commission)
-				pnlAmt := sellProceeds - pos.amount
-				pnlPct := pnlAmt / pos.amount * 100
-				capital += sellProceeds
+				sellProceeds := pos.shares * sellPrice * (1 - commission)
+				pnlAmt := sellProceeds - pos.costBasis
+				pnlPct := pnlAmt / pos.costBasis * 100
+				cash += sellProceeds
 
 				allTrades = append(allTrades, TradeResult{
 					Code: pos.code, Name: pos.name, BuyDate: pos.buyDate, SellDate: d,
 					BuyPrice: pos.buyPrice, SellPrice: sellPrice, PnLPct: pnlPct, PnLAmount: pnlAmt,
-					HoldDays: pos.dayHeld, Reason: fmt.Sprintf("%d板/%.0f分/%s", pos.boardCount, pos.score, sellReason),
-					Score: pos.score, Position: pos.amount,
+					HoldDays: pos.dayHeld, Score: pos.score, Position: pos.costBasis,
+					Reason: fmt.Sprintf("%d板/%.0f分/%s", pos.boardCount, pos.score, sellReason),
 				})
+
+				if b.cfg.Verbose {
+					log.Printf("  [卖] %s %s %.2f→%.2f %+.2f%% %s",
+						d.Format("01-02"), pos.name, pos.buyPrice, sellPrice, pnlPct, sellReason)
+				}
 			} else {
-				keepPositions = append(keepPositions, pos)
+				keepPos = append(keepPos, pos)
 			}
 		}
-		positions = keepPositions
+		positions = keepPos
 
-		// Step 2: 当日涨停 → 评分排序 → 排板买入
+		// ====== Phase 2: 选股 + 买入 ======
 		dayRecords := dateMap[dateStr]
 
 		analyses, _ := b.store.GetZTAnalysisRange(ctx, d, d)
@@ -257,8 +272,14 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 			score float64
 		}
 		var candidates []scored
+
+		filterFn := passBoardQueueFilter
+		if b.cfg.Mode == "追板" {
+			filterFn = passCloseFilter
+		}
+
 		for _, zt := range dayRecords {
-			if !passBoardQueueFilter(zt) {
+			if !filterFn(zt) {
 				continue
 			}
 			held := false
@@ -281,65 +302,103 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 			return candidates[i].score > candidates[j].score
 		})
 
-		// 排板买入：以涨停收盘价买入
 		slotsAvail := b.cfg.MaxPicks - len(positions)
-		if slotsAvail <= 0 || di+1 >= len(dates) {
-			goto recordEquity
-		}
 
-		for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
-			zt := candidates[k].zt
+		if b.cfg.Mode == "排板" {
+			// 排板模式：T日以涨停收盘价买入
+			for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
+				zt := candidates[k].zt
 
-			// 排板成功率模型：根据封单强度和封板时间估算
-			// 早封未炸板、封单大 → 排板困难(太强的票排不到)
-			// 适中封单 → 可以排到
-			queueSuccess := true
-			if zt.SealAmount > 0 && zt.FloatMV > 0 {
-				sealRatio := zt.SealAmount / zt.FloatMV * 100
-				if sealRatio > 10 {
-					// 封单占流通市值>10% → 太抢手排不到
-					queueSuccess = false
-					skipCount++
+				// 排板成功率模型（基于换手率估算）
+				// 换手<1%: 一字板，极难排到 → 跳过
+				// 换手1-3%: 缩量板，很难排到 → 50%概率跳过
+				// 换手3-8%: 有量但封板 → 可排到
+				// 换手8%+: 反复开板 → 可排到
+				if zt.Turnover < 1 {
+					skipBuy++
 					continue
 				}
-			}
-			// 一字板(早封+极低换手+未炸板)基本排不到
-			if zt.Turnover < 1 && zt.FailCount == 0 && zt.FirstSealTime != "" && zt.FirstSealTime <= "09:30:00" {
-				queueSuccess = false
-				skipCount++
-				continue
-			}
-			_ = queueSuccess
+				if zt.Turnover < 3 && di%2 == 0 {
+					// 模拟50%排板失败率
+					skipBuy++
+					continue
+				}
 
-			buyPrice := zt.Close
-			posAmt := maxPositionAmt
-			if posAmt > capital {
-				posAmt = capital
-			}
-			if posAmt < 10000 {
-				continue
-			}
+				buyPrice := zt.Close
+				commission := b.cfg.Commission / 100
+				posAmt := maxPosAmt
+				if posAmt > cash {
+					posAmt = cash
+				}
+				if posAmt < 10000 {
+					continue
+				}
+				shares := posAmt / (buyPrice * (1 + commission))
+				costBasis := shares * buyPrice * (1 + commission)
+				cash -= costBasis
 
-			capital -= posAmt
-			positions = append(positions, openPosition{
-				code:       zt.Code,
-				name:       zt.Name,
-				buyDate:    d,
-				buyPrice:   buyPrice,
-				amount:     posAmt,
-				score:      candidates[k].score,
-				boardCount: zt.BoardCount,
-				dayHeld:    0,
-			})
-			slotsAvail--
+				positions = append(positions, livePosition{
+					code: zt.Code, name: zt.Name, buyDate: d, buyPrice: buyPrice,
+					shares: shares, costBasis: costBasis, mktValue: shares * buyPrice,
+					score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
+				})
+				slotsAvail--
+
+				if b.cfg.Verbose {
+					log.Printf("  [买] %s %s %d板 %.2f 换手%.1f%% 评分%.0f",
+						d.Format("01-02"), zt.Name, zt.BoardCount, buyPrice, zt.Turnover, candidates[k].score)
+				}
+			}
+		} else {
+			// 追板模式：T日选股 → T+1开盘买入
+			if di+1 < len(dates) {
+				nextDateStr := dates[di+1]
+				nextD, _ := time.Parse("2006-01-02", nextDateStr)
+
+				for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
+					zt := candidates[k].zt
+					quotes, err := b.store.GetDailyQuotes(ctx, zt.Code, nextD, nextD)
+					if err != nil || len(quotes) == 0 || quotes[0].Open <= 0 {
+						continue
+					}
+					nextQ := quotes[0]
+
+					// 一字涨停买不进
+					ztPrice := nextQ.PreClose * (1 + b.cfg.ZTThreshold/100)
+					if nextQ.PreClose > 0 && nextQ.Open >= ztPrice*0.999 {
+						skipBuy++
+						continue
+					}
+
+					buyPrice := nextQ.Open * (1 + b.cfg.Slippage/100)
+					commission := b.cfg.Commission / 100
+					posAmt := maxPosAmt
+					if posAmt > cash {
+						posAmt = cash
+					}
+					if posAmt < 10000 {
+						continue
+					}
+					shares := posAmt / (buyPrice * (1 + commission))
+					costBasis := shares * buyPrice * (1 + commission)
+					cash -= costBasis
+
+					positions = append(positions, livePosition{
+						code: zt.Code, name: zt.Name, buyDate: nextD, buyPrice: buyPrice,
+						shares: shares, costBasis: costBasis, mktValue: shares * buyPrice,
+						score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
+					})
+					slotsAvail--
+				}
+			}
 		}
 
-	recordEquity:
-		hv := 0.0
+		// ====== Phase 3: 记录每日净值 ======
+		holdingMV := 0.0
 		for _, p := range positions {
-			hv += p.amount
+			holdingMV += p.mktValue
 		}
-		totalEquity := capital + hv
+		totalEquity := cash + holdingMV
 		cumPnl := (totalEquity - b.cfg.InitialCapital) / b.cfg.InitialCapital * 100
 		dailyCurve = append(dailyCurve, DailyEquity{Date: dateStr, Equity: totalEquity, CumPnl: cumPnl})
 	}
@@ -350,27 +409,26 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 		for _, pos := range positions {
 			quotes, _ := b.store.GetDailyQuotes(ctx, pos.code, lastD, lastD)
 			sellPrice := pos.buyPrice
-			if len(quotes) > 0 {
+			if len(quotes) > 0 && quotes[0].Close > 0 {
 				sellPrice = quotes[0].Close
 			}
 			commission := b.cfg.Commission / 100
-			shares := pos.amount / (pos.buyPrice * (1 + commission))
-			sellProceeds := shares * sellPrice * (1 - commission)
-			pnlAmt := sellProceeds - pos.amount
-			pnlPct := pnlAmt / pos.amount * 100
-			capital += sellProceeds
+			sellProceeds := pos.shares * sellPrice * (1 - commission)
+			pnlAmt := sellProceeds - pos.costBasis
+			pnlPct := pnlAmt / pos.costBasis * 100
+			cash += sellProceeds
 			allTrades = append(allTrades, TradeResult{
 				Code: pos.code, Name: pos.name, BuyDate: pos.buyDate, SellDate: lastD,
 				BuyPrice: pos.buyPrice, SellPrice: sellPrice, PnLPct: pnlPct, PnLAmount: pnlAmt,
-				HoldDays: pos.dayHeld, Reason: "回测结束平仓", Score: pos.score, Position: pos.amount,
+				HoldDays: pos.dayHeld, Reason: "回测结束平仓", Score: pos.score, Position: pos.costBasis,
 			})
 		}
 	}
 
-	result := calculateBacktestResult(allTrades, b.cfg.InitialCapital, capital, len(dates))
-	result.SkipZTBuy = skipCount
-	result.DailyCurve = dailyCurve
-	printBacktestResultV2(result)
+	result := computeResult(allTrades, dailyCurve, b.cfg.InitialCapital, cash, len(dates))
+	result.SkipZTBuy = skipBuy
+	result.SkipDTSell = skipDTSell
+	printResult(result, b.cfg.Mode)
 
 	for _, t := range allTrades {
 		sellDate := t.SellDate
@@ -384,261 +442,14 @@ func (b *Backtester) runBoardQueue(ctx context.Context) (*BacktestResult, error)
 	return result, nil
 }
 
-// runChaseOpen 追板策略：T日涨停 → T+1日开盘买入 → 持有HoldDays天
-func (b *Backtester) runChaseOpen(ctx context.Context) (*BacktestResult, error) {
-	allZT, err := b.store.GetZTRecordsRange(ctx, b.cfg.StartDate, b.cfg.EndDate)
-	if err != nil {
-		return nil, fmt.Errorf("获取涨停记录失败: %w", err)
-	}
-
-	dateMap := make(map[string][]model.ZTRecord)
-	var dates []string
-	for _, r := range allZT {
-		key := r.Date.Format("2006-01-02")
-		if _, ok := dateMap[key]; !ok {
-			dates = append(dates, key)
-		}
-		dateMap[key] = append(dateMap[key], r)
-	}
-	sort.Strings(dates)
-
-	capital := b.cfg.InitialCapital
-	var positions []openPosition
-	var allTrades []TradeResult
-	var dailyCurve []DailyEquity
-	skipZTBuy := 0
-	maxPositionAmt := b.cfg.InitialCapital * b.cfg.PositionPct / 100
-
-	for di, dateStr := range dates {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		d, _ := time.Parse("2006-01-02", dateStr)
-
-		var keepPositions []openPosition
-		for _, pos := range positions {
-			pos.dayHeld++
-			quotes, err := b.store.GetDailyQuotes(ctx, pos.code, d, d)
-			if err != nil || len(quotes) == 0 {
-				keepPositions = append(keepPositions, pos)
-				continue
-			}
-			q := quotes[0]
-
-			sold := false
-			var sellPrice float64
-			var sellReason string
-
-			dtPrice := q.PreClose * (1 - b.cfg.ZTThreshold/100)
-			if q.PreClose > 0 && q.High <= dtPrice*1.001 {
-				if pos.dayHeld >= b.cfg.HoldDays {
-					sellPrice = q.Close
-					sellReason = "到期(跌停)"
-					sold = true
-				} else {
-					keepPositions = append(keepPositions, pos)
-					continue
-				}
-			}
-
-			if !sold && b.cfg.StopLoss > 0 {
-				lossLimit := pos.buyPrice * (1 - b.cfg.StopLoss/100)
-				if q.Low <= lossLimit {
-					sellPrice = lossLimit * (1 - b.cfg.Slippage/100)
-					sellReason = "止损"
-					sold = true
-				}
-			}
-
-			if !sold && b.cfg.TakeProfit > 0 {
-				profitLimit := pos.buyPrice * (1 + b.cfg.TakeProfit/100)
-				if q.High >= profitLimit {
-					sellPrice = profitLimit * (1 - b.cfg.Slippage/100)
-					sellReason = "止盈"
-					sold = true
-				}
-			}
-
-			if !sold && pos.dayHeld >= b.cfg.HoldDays {
-				sellPrice = q.Close * (1 - b.cfg.Slippage/100)
-				sellReason = "到期"
-				sold = true
-			}
-
-			if sold && sellPrice > 0 {
-				commission := b.cfg.Commission / 100
-				shares := pos.amount / (pos.buyPrice * (1 + commission))
-				sellProceeds := shares * sellPrice * (1 - commission)
-				pnlAmt := sellProceeds - pos.amount
-				pnlPct := pnlAmt / pos.amount * 100
-				capital += sellProceeds
-				allTrades = append(allTrades, TradeResult{
-					Code: pos.code, Name: pos.name, BuyDate: pos.buyDate, SellDate: d,
-					BuyPrice: pos.buyPrice, SellPrice: sellPrice, PnLPct: pnlPct, PnLAmount: pnlAmt,
-					HoldDays: pos.dayHeld, Reason: fmt.Sprintf("%d板/%.0f分/%s", pos.boardCount, pos.score, sellReason),
-					Score: pos.score, Position: pos.amount,
-				})
-			} else {
-				keepPositions = append(keepPositions, pos)
-			}
-		}
-		positions = keepPositions
-
-		dayRecords := dateMap[dateStr]
-		analyses, _ := b.store.GetZTAnalysisRange(ctx, d, d)
-		var analysis *model.ZTAnalysis
-		if len(analyses) > 0 {
-			analysis = &analyses[0]
-		}
-
-		sectorCount := make(map[string]int)
-		for _, r := range dayRecords {
-			if r.Industry != "" {
-				sectorCount[r.Industry]++
-			}
-		}
-
-		type scored struct {
-			zt    model.ZTRecord
-			score float64
-		}
-		var candidates []scored
-		for _, zt := range dayRecords {
-			if !passCloseFilter(zt) {
-				continue
-			}
-			held := false
-			for _, p := range positions {
-				if p.code == zt.Code {
-					held = true
-					break
-				}
-			}
-			if held {
-				continue
-			}
-			sc := BuildScoreContext(ctx, b.store, zt, analysis, sectorCount[zt.Industry])
-			score := ScoreCandidateV2(sc)
-			if score < 50 {
-				continue
-			}
-			candidates = append(candidates, scored{zt: zt, score: score})
-		}
-
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].score > candidates[j].score
-		})
-
-		if di+1 < len(dates) {
-			nextDateStr := dates[di+1]
-			nextD, _ := time.Parse("2006-01-02", nextDateStr)
-
-			slotsAvail := b.cfg.MaxPicks - len(positions)
-			if slotsAvail <= 0 {
-				goto recordEquity2
-			}
-
-			for k := 0; k < len(candidates) && slotsAvail > 0; k++ {
-				zt := candidates[k].zt
-				quotes, err := b.store.GetDailyQuotes(ctx, zt.Code, nextD, nextD)
-				if err != nil || len(quotes) == 0 || quotes[0].Open <= 0 {
-					continue
-				}
-				nextQ := quotes[0]
-				ztPrice := nextQ.PreClose * (1 + b.cfg.ZTThreshold/100)
-				if nextQ.PreClose > 0 && nextQ.Open >= ztPrice*0.999 {
-					skipZTBuy++
-					continue
-				}
-
-				buyPrice := nextQ.Open * (1 + b.cfg.Slippage/100)
-				posAmt := maxPositionAmt
-				if posAmt > capital {
-					posAmt = capital
-				}
-				if posAmt < 10000 {
-					continue
-				}
-
-				capital -= posAmt
-				positions = append(positions, openPosition{
-					code: zt.Code, name: zt.Name, buyDate: nextD, buyPrice: buyPrice,
-					amount: posAmt, score: candidates[k].score, boardCount: zt.BoardCount, dayHeld: 0,
-				})
-				slotsAvail--
-			}
-		}
-
-	recordEquity2:
-		hv := 0.0
-		for _, p := range positions {
-			hv += p.amount
-		}
-		totalEquity := capital + hv
-		cumPnl := (totalEquity - b.cfg.InitialCapital) / b.cfg.InitialCapital * 100
-		dailyCurve = append(dailyCurve, DailyEquity{Date: dateStr, Equity: totalEquity, CumPnl: cumPnl})
-	}
-
-	if len(dates) > 0 {
-		lastD, _ := time.Parse("2006-01-02", dates[len(dates)-1])
-		for _, pos := range positions {
-			quotes, _ := b.store.GetDailyQuotes(ctx, pos.code, lastD, lastD)
-			sellPrice := pos.buyPrice
-			if len(quotes) > 0 {
-				sellPrice = quotes[0].Close
-			}
-			commission := b.cfg.Commission / 100
-			shares := pos.amount / (pos.buyPrice * (1 + commission))
-			sellProceeds := shares * sellPrice * (1 - commission)
-			pnlAmt := sellProceeds - pos.amount
-			pnlPct := pnlAmt / pos.amount * 100
-			capital += sellProceeds
-			allTrades = append(allTrades, TradeResult{
-				Code: pos.code, Name: pos.name, BuyDate: pos.buyDate, SellDate: lastD,
-				BuyPrice: pos.buyPrice, SellPrice: sellPrice, PnLPct: pnlPct, PnLAmount: pnlAmt,
-				HoldDays: pos.dayHeld, Reason: "回测结束平仓", Score: pos.score, Position: pos.amount,
-			})
-		}
-	}
-
-	result := calculateBacktestResult(allTrades, b.cfg.InitialCapital, capital, len(dates))
-	result.SkipZTBuy = skipZTBuy
-	result.DailyCurve = dailyCurve
-	printBacktestResultV2(result)
-
-	for _, t := range allTrades {
-		sellDate := t.SellDate
-		tr := model.TradeRecord{
-			Code: t.Code, Name: t.Name, BuyDate: t.BuyDate, BuyPrice: t.BuyPrice,
-			SellDate: &sellDate, SellPrice: t.SellPrice, PnL: t.PnLAmount, PnLPct: t.PnLPct, IsBacktest: true,
-		}
-		b.store.InsertTradeRecord(ctx, tr)
-	}
-
-	return result, nil
-}
-
-func holdingValue(positions []openPosition, excludeCode string) float64 {
-	v := 0.0
-	for _, p := range positions {
-		if p.code != excludeCode {
-			v += p.amount
-		}
-	}
-	return v
-}
-
-func calculateBacktestResult(trades []TradeResult, initCap, finalCap float64, totalDays int) *BacktestResult {
+func computeResult(trades []TradeResult, curve []DailyEquity, initCap, finalCap float64, totalDays int) *BacktestResult {
 	r := &BacktestResult{
 		TotalTrades:  len(trades),
 		Trades:       trades,
 		FinalCapital: finalCap,
 		TotalDays:    totalDays,
+		DailyCurve:   curve,
 	}
-
 	if len(trades) == 0 {
 		return r
 	}
@@ -646,21 +457,11 @@ func calculateBacktestResult(trades []TradeResult, initCap, finalCap float64, to
 	var totalProfit, totalLoss float64
 	var maxWin, maxLoss float64
 	pnls := make([]float64, len(trades))
-	cumPnl := 0.0
-	peak := 0.0
-	maxDD := 0.0
+	totalHoldDays := 0
 
 	for i, t := range trades {
 		pnls[i] = t.PnLPct
-		cumPnl += t.PnLPct
-		if cumPnl > peak {
-			peak = cumPnl
-		}
-		dd := peak - cumPnl
-		if dd > maxDD {
-			maxDD = dd
-		}
-
+		totalHoldDays += t.HoldDays
 		if t.PnLPct > 0 {
 			r.WinTrades++
 			totalProfit += t.PnLPct
@@ -677,24 +478,36 @@ func calculateBacktestResult(trades []TradeResult, initCap, finalCap float64, to
 	}
 
 	r.WinRate = float64(r.WinTrades) / float64(r.TotalTrades) * 100
-	r.AvgPnLPct = cumPnl / float64(r.TotalTrades)
+	r.AvgPnLPct = (totalProfit - totalLoss) / float64(r.TotalTrades)
 	r.MaxWin = maxWin
 	r.MaxLoss = maxLoss
-	r.MaxDrawdown = maxDD
-
+	r.AvgHoldDays = float64(totalHoldDays) / float64(r.TotalTrades)
 	if totalLoss > 0 {
 		r.ProfitFactor = totalProfit / totalLoss
+	}
+
+	// 从净值曲线计算最大回撤
+	peak := 0.0
+	for _, eq := range curve {
+		if eq.Equity > peak {
+			peak = eq.Equity
+		}
+		dd := (peak - eq.Equity) / peak * 100
+		if dd > r.MaxDrawdownPct {
+			r.MaxDrawdownPct = dd
+		}
 	}
 
 	r.TotalPnLPct = (finalCap - initCap) / initCap * 100
 
 	if totalDays > 0 {
 		years := float64(totalDays) / 250.0
-		if years > 0 {
+		if years > 0 && finalCap > 0 {
 			r.AnnualReturn = (math.Pow(finalCap/initCap, 1.0/years) - 1) * 100
 		}
 	}
 
+	// Sharpe (年化，无风险利率3%)
 	if len(pnls) > 1 {
 		mean := r.AvgPnLPct
 		sumSq := 0.0
@@ -703,22 +516,26 @@ func calculateBacktestResult(trades []TradeResult, initCap, finalCap float64, to
 		}
 		std := math.Sqrt(sumSq / float64(len(pnls)-1))
 		if std > 0 {
-			r.SharpeRatio = (mean * math.Sqrt(250)) / std
+			tradesPerYear := float64(len(pnls)) / (float64(totalDays) / 250.0)
+			annMean := mean * tradesPerYear
+			annStd := std * math.Sqrt(tradesPerYear)
+			r.SharpeRatio = (annMean - 3.0) / annStd
 		}
 	}
 
 	return r
 }
 
-func printBacktestResultV2(r *BacktestResult) {
-	log.Println("================ 回测结果 ================")
-	log.Printf("总交易次数: %d | 交易日: %d", r.TotalTrades, r.TotalDays)
+func printResult(r *BacktestResult, mode string) {
+	log.Printf("============ 回测结果 [%s] ============", mode)
+	log.Printf("交易笔数: %d | 交易日: %d | 平均持有: %.1f天", r.TotalTrades, r.TotalDays, r.AvgHoldDays)
 	log.Printf("盈利: %d | 亏损: %d | 胜率: %.1f%%", r.WinTrades, r.LoseTrades, r.WinRate)
 	log.Printf("资金收益: %.2f%% | 年化: %.2f%%", r.TotalPnLPct, r.AnnualReturn)
 	log.Printf("平均每笔: %.2f%% | 盈亏比: %.2f", r.AvgPnLPct, r.ProfitFactor)
-	log.Printf("最大盈利: %.2f%% | 最大亏损: %.2f%%", r.MaxWin, r.MaxLoss)
-	log.Printf("最大回撤: %.2f%% | Sharpe: %.3f", r.MaxDrawdown, r.SharpeRatio)
-	log.Printf("排板失败/涨停买不进: %d次", r.SkipZTBuy)
+	log.Printf("最大单笔赚: %.2f%% | 最大单笔亏: %.2f%%", r.MaxWin, r.MaxLoss)
+	log.Printf("最大回撤: %.2f%%", r.MaxDrawdownPct)
+	log.Printf("Sharpe: %.3f", r.SharpeRatio)
+	log.Printf("排板失败/买不进: %d次 | 跌停卖不出: %d次", r.SkipZTBuy, r.SkipDTSell)
 	log.Printf("最终资金: %.0f", r.FinalCapital)
-	log.Println("============================================")
+	log.Println("==========================================")
 }
