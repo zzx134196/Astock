@@ -70,6 +70,11 @@ func main() {
 		if err := c.CollectLHB(ctx); err != nil {
 			log.Fatalf("采集龙虎榜失败: %v", err)
 		}
+	case "lhb_detail":
+		log.Println("=== 开始采集龙虎榜席位明细 ===")
+		if err := c.CollectLHBDetail(ctx); err != nil {
+			log.Fatalf("采集龙虎榜席位失败: %v", err)
+		}
 	case "sectors":
 		log.Println("=== 开始采集板块概念数据 ===")
 		if err := c.CollectSectors(ctx); err != nil {

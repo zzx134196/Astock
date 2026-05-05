@@ -8,11 +8,12 @@ import (
 	"astock/internal/model"
 )
 
-// CollectLHB 采集龙虎榜数据(近30个交易日)
+// CollectLHB 采集龙虎榜数据(近30个交易日，先采列表，席位明细异步补采)
 func (c *Collector) CollectLHB(ctx context.Context) error {
 	log.Println("[采集] 开始采集龙虎榜数据...")
 	now := time.Now()
 
+	totalRecords := 0
 	for i := 0; i < 60; i++ {
 		select {
 		case <-ctx.Done():
@@ -28,7 +29,6 @@ func (c *Collector) CollectLHB(ctx context.Context) error {
 		dateStr := d.Format("20060102")
 		records, err := c.em.FetchLHBList(dateStr)
 		if err != nil {
-			log.Printf("[采集] 龙虎榜 %s 获取失败: %v", dateStr, err)
 			c.em.Sleep()
 			continue
 		}
@@ -42,23 +42,56 @@ func (c *Collector) CollectLHB(ctx context.Context) error {
 			continue
 		}
 
-		// 获取席位明细
+		totalRecords += len(records)
+		log.Printf("[采集] 龙虎榜 %s: %d 只上榜 (累计%d)", dateStr, len(records), totalRecords)
+		c.em.Sleep()
+	}
+
+	log.Printf("[采集] 龙虎榜列表采集完成，共 %d 条", totalRecords)
+	return nil
+}
+
+// CollectLHBDetail 补采龙虎榜席位明细(独立任务，耗时较长)
+func (c *Collector) CollectLHBDetail(ctx context.Context) error {
+	log.Println("[采集] 开始补采龙虎榜席位明细...")
+	now := time.Now()
+
+	totalDetails := 0
+	for i := 0; i < 60; i++ {
+		d := now.AddDate(0, 0, -i)
+		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
+			continue
+		}
+
+		dateStr := d.Format("20060102")
+		records, err := c.em.FetchLHBList(dateStr)
+		if err != nil || len(records) == 0 {
+			c.em.Sleep()
+			continue
+		}
+
 		for _, r := range records {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			details, err := c.em.FetchLHBDetail(r.Code, dateStr)
 			if err != nil {
 				continue
 			}
 			if len(details) > 0 {
 				c.store.InsertLHBDetails(ctx, details)
+				totalDetails += len(details)
 			}
 			c.em.Sleep()
 		}
 
-		log.Printf("[采集] 龙虎榜 %s: %d 只上榜", dateStr, len(records))
-		c.em.Sleep()
+		log.Printf("[采集] 龙虎榜席位 %s 完成 (累计%d条明细)", dateStr, totalDetails)
 	}
 
-	log.Println("[采集] 龙虎榜数据采集完成")
+	log.Printf("[采集] 龙虎榜席位明细采集完成，共 %d 条", totalDetails)
 	return nil
 }
 

@@ -47,6 +47,14 @@ func main() {
 		if err := a.AnalyzeSector(ctx); err != nil {
 			log.Fatalf("板块效应分析失败: %v", err)
 		}
+	case "indicators":
+		log.Println("=== 计算技术指标 ===")
+		if err := db.MigrateIndicators(); err != nil {
+			log.Fatalf("指标表迁移失败: %v", err)
+		}
+		if err := a.CalculateIndicators(ctx); err != nil {
+			log.Fatalf("技术指标计算失败: %v", err)
+		}
 	case "backtest":
 		log.Println("=== 策略回测 ===")
 		startDate, _ := time.Parse("20060102", cfg.DataSource.HistoryStartDate)
