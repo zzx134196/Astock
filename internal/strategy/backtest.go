@@ -297,11 +297,7 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 					continue
 				}
 
-				sc := ScoreContext{
-					ZT:            zt,
-					Analysis:      analysis,
-					SectorZTCount: sectorCount[zt.Industry],
-				}
+				sc := BuildScoreContext(ctx, b.store, zt, analysis, sectorCount[zt.Industry])
 				score := ScoreCandidateV3(sc)
 				candidates = append(candidates, scored{zt: zt, score: score})
 			}
