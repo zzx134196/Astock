@@ -1,0 +1,27 @@
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "postgres"
+  password: "123456"
+  dbname: "astock"
+  sslmode: "disable"
+
+datasource:
+  # 东方财富API请求间隔(毫秒)，避免被封
+  request_interval_ms: 200
+  # 历史数据起始日期
+  history_start_date: "20240101"
+  # 用户代理
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+strategy:
+  # 主板涨停幅度阈值
+  zt_threshold: 9.9
+  # 最大选股数量
+  max_picks: 10
+  # 默认止损比例(%)
+  default_stop_loss: 5.0
+
+notify:
+  enabled: false
+  # webhook_url: ""
