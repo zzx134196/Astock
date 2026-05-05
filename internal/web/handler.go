@@ -74,6 +74,16 @@ func latestTradeDate() time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 }
 
+// latestTradeDateFromDB 从数据库获取实际最新交易日(比纯日历计算更准确，能处理节假日)
+func (s *Server) latestTradeDateFromDB() time.Time {
+	var date time.Time
+	err := s.store.DB().QueryRow(`SELECT COALESCE(MAX(date), CURRENT_DATE) FROM daily_quotes`).Scan(&date)
+	if err != nil {
+		return latestTradeDate()
+	}
+	return date
+}
+
 // ==================== Handlers ====================
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +93,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
-	date := latestTradeDate()
+	date := s.latestTradeDateFromDB()
 
 	zt, _ := s.store.GetZTRecordsByDate(ctx, date)
 	analyses, _ := s.store.GetZTAnalysisRange(ctx, date, date)
@@ -106,7 +116,7 @@ func (s *Server) handleZTToday(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	date := getDateParam(r, "date")
 	if date.IsZero() {
-		date = latestTradeDate()
+		date = s.latestTradeDateFromDB()
 	}
 
 	records, err := s.store.GetZTRecordsByDate(ctx, date)
@@ -125,7 +135,7 @@ func (s *Server) handleZTToday(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleZTHistory(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	days := 30
-	end := latestTradeDate()
+	end := s.latestTradeDateFromDB()
 	start := end.AddDate(0, 0, -days)
 
 	analyses, _ := s.store.GetZTAnalysisRange(ctx, start, end)
@@ -139,7 +149,7 @@ func (s *Server) handleSentiment(w http.ResponseWriter, r *http.Request) {
 	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 365 {
 		days = d
 	}
-	end := latestTradeDate()
+	end := s.latestTradeDateFromDB()
 	start := end.AddDate(0, 0, -days)
 
 	rows, err := s.store.DB().QueryContext(ctx,
@@ -194,7 +204,7 @@ func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	date := getDateParam(r, "date")
 	if date.IsZero() {
-		date = latestTradeDate()
+		date = s.latestTradeDateFromDB()
 	}
 	signalType := r.URL.Query().Get("type")
 	if signalType == "" {
@@ -322,7 +332,7 @@ func (s *Server) handleLHB(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	date := getDateParam(r, "date")
 	if date.IsZero() {
-		date = latestTradeDate()
+		date = s.latestTradeDateFromDB()
 	}
 
 	rows, err := s.store.DB().QueryContext(ctx,
@@ -353,7 +363,7 @@ func (s *Server) handleFlowTop(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	date := getDateParam(r, "date")
 	if date.IsZero() {
-		date = latestTradeDate()
+		date = s.latestTradeDateFromDB()
 	}
 
 	rows, err := s.store.DB().QueryContext(ctx,
@@ -449,7 +459,7 @@ func (s *Server) handleStockDetail(w http.ResponseWriter, r *http.Request) {
 		months = m
 	}
 
-	end := latestTradeDate()
+	end := s.latestTradeDateFromDB()
 	start := end.AddDate(0, -months, 0)
 
 	// 获取股票基本信息
@@ -548,7 +558,7 @@ func (s *Server) handleStockFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	end := latestTradeDate()
+	end := s.latestTradeDateFromDB()
 	start := end.AddDate(0, -3, 0)
 
 	rows, err := s.store.DB().QueryContext(ctx,
