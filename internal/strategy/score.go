@@ -41,6 +41,7 @@ type ScoreContext struct {
 	LHBNetAmount  float64
 	HotRank       int
 	ConceptCount  int
+	IsFanpack     bool // 反包涨停（之前涨停过+回调后再涨停）
 }
 
 // PassPromoFilter 基于晋级概率的过滤器（分级）
@@ -200,6 +201,11 @@ func ScorePromoV7(sc ScoreContext) float64 {
 		}
 	}
 
+	// 10. 反包加分（首板反包T日+0.663% vs 普通首板+0.263%）
+	if sc.IsFanpack {
+		score += 5
+	}
+
 	return score
 }
 
@@ -270,6 +276,23 @@ func BuildScoreContext(ctx context.Context, s *store.Store, zt model.ZTRecord, a
 	s.DB().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stock_concepts WHERE code = $1`, zt.Code).Scan(&conceptCount)
 	sc.ConceptCount = conceptCount
+
+	// 反包检测：之前5天内有涨停记录 且 中间有跌的交易日
+	if zt.BoardCount == 1 {
+		var prevZTDate interface{}
+		s.DB().QueryRowContext(ctx,
+			`SELECT date FROM zt_records WHERE code = $1 AND date < $2 AND date >= $2 - interval '5 days' ORDER BY date DESC LIMIT 1`,
+			zt.Code, date).Scan(&prevZTDate)
+		if prevZTDate != nil {
+			var dropCount int
+			s.DB().QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM daily_quotes WHERE code = $1 AND date > $2 AND date < $3 AND pct_chg < 0`,
+				zt.Code, prevZTDate, date).Scan(&dropCount)
+			if dropCount > 0 {
+				sc.IsFanpack = true
+			}
+		}
+	}
 
 	return sc
 }

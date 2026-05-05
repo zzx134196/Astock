@@ -263,13 +263,14 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 			}
 			nextQ := quotes[0]
 
-			ztPrice := nextQ.PreClose * (1 + b.cfg.ZTThreshold/100)
+			pctLimit := ztPctByCode(zt.Code)
+			ztPrice := nextQ.PreClose * (1 + pctLimit/100)
 			if nextQ.PreClose > 0 && nextQ.Open >= ztPrice*0.999 {
 				skipBuy++
 				continue
 			}
 
-			dtPrice := nextQ.PreClose * (1 - b.cfg.ZTThreshold/100)
+			dtPrice := nextQ.PreClose * (1 - pctLimit/100)
 			if nextQ.PreClose > 0 && nextQ.Open <= dtPrice*1.001 {
 				continue
 			}
@@ -324,13 +325,17 @@ func (b *Backtester) Run(ctx context.Context) (*BacktestResult, error) {
 				if promoted {
 					promoTag = " ★晋级"
 				}
+				fpTag := ""
+				if candidates[k].sc.IsFanpack {
+					fpTag = " [反包]"
+				}
 				t1Tag := ""
 				if t1Found {
 					t1Tag = fmt.Sprintf(" | T+1:%+.2f%%", t1DayPnl)
 				}
-				rprintf("  [选] %s %s %s 评%.0f | T日:%+.2f%%%s%s",
+				rprintf("  [选] %s %s %s 评%.0f | T日:%+.2f%%%s%s%s",
 					nextD.Format("01-02"), zt.Name, reason,
-					candidates[k].score, tDayPnl, t1Tag, promoTag)
+					candidates[k].score, tDayPnl, t1Tag, promoTag, fpTag)
 			}
 		}
 	}
@@ -404,6 +409,18 @@ func passBaseFilter(zt model.ZTRecord) bool {
 		return false
 	}
 	return true
+}
+
+// ztPctByCode 根据股票代码返回涨跌停幅度
+// 创业板(300/301)和科创板(688/689)是20%，其余主板是10%
+func ztPctByCode(code string) float64 {
+	if len(code) >= 3 {
+		prefix := code[:3]
+		if prefix == "300" || prefix == "301" || prefix == "688" || prefix == "689" {
+			return 20.0
+		}
+	}
+	return 10.0
 }
 
 func printResultV7(r *BacktestResult, skipMarket int, noSignal int) {
