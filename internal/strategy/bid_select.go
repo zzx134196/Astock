@@ -42,11 +42,22 @@ func (s *Selector) BidSelect(ctx context.Context) ([]Signal, error) {
 
 	log.Printf("[竞价] 昨日涨停 %d 只，开始竞价分析", len(yesterdayZT))
 
-	// 获取情绪分析
+	// 市场环境过滤：涨停家数<30时不操作
+	if len(yesterdayZT) < 30 {
+		log.Printf("[竞价] 涨停仅%d家(<30)，市场偏冷，暂不操作", len(yesterdayZT))
+		return nil, nil
+	}
+
 	analyses, _ := s.store.GetZTAnalysisRange(ctx, yesterday, yesterday)
 	var analysis *model.ZTAnalysis
 	if len(analyses) > 0 {
 		analysis = &analyses[0]
+	}
+
+	// 情绪过滤
+	if analysis != nil && (analysis.SentimentPhase == "冰点" || analysis.SentimentPhase == "回暖") {
+		log.Printf("[竞价] 情绪处于%s期，暂不操作", analysis.SentimentPhase)
+		return nil, nil
 	}
 
 	sectorCount := make(map[string]int)
@@ -58,7 +69,7 @@ func (s *Selector) BidSelect(ctx context.Context) ([]Signal, error) {
 
 	var candidates []Signal
 	for _, zt := range yesterdayZT {
-		if !passCloseFilter(zt) {
+		if !passBaseFilter(zt) {
 			continue
 		}
 

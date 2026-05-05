@@ -76,26 +76,28 @@ func main() {
 		log.Println("=== 策略回测 ===")
 		startDate, _ := time.Parse("20060102", cfg.DataSource.HistoryStartDate)
 
-		// 排板策略
+		// 收盘选股：T日收盘选Top2 → T+1收盘卖出（无止盈止损，纯看选股能力）
 		bt1 := strategy.NewBacktester(db, strategy.BacktestConfig{
 			StartDate: startDate, EndDate: time.Now(),
-			MaxPicks: 3, StopLoss: 5, TakeProfit: 0, HoldDays: 2,
-			InitialCapital: 1000000, PositionPct: 25, Mode: "排板",
+			MaxPicks: 2, HoldDays: 1, StopLoss: 0, TakeProfit: 0,
+			InitialCapital: 1000000, PositionPct: 50, Mode: "收盘选股",
+			MinZTCount: 30, Verbose: true,
 		})
 		if _, err := bt1.Run(ctx); err != nil {
-			log.Fatalf("排板回测失败: %v", err)
+			log.Fatalf("收盘选股回测失败: %v", err)
 		}
 
 		log.Println("")
 
-		// 追板策略（对比）
+		// 开盘选股对比：T日选出 → T+1开盘买 → T+1收盘卖
 		bt2 := strategy.NewBacktester(db, strategy.BacktestConfig{
 			StartDate: startDate, EndDate: time.Now(),
-			MaxPicks: 3, StopLoss: 5, TakeProfit: 0, HoldDays: 2,
-			InitialCapital: 1000000, PositionPct: 25, Mode: "追板",
+			MaxPicks: 2, HoldDays: 1, StopLoss: 0, TakeProfit: 0,
+			InitialCapital: 1000000, PositionPct: 50, Mode: "开盘选股",
+			MinZTCount: 30,
 		})
 		if _, err := bt2.Run(ctx); err != nil {
-			log.Fatalf("追板回测失败: %v", err)
+			log.Fatalf("开盘选股回测失败: %v", err)
 		}
 
 	case "sweep":
