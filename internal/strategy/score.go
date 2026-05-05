@@ -8,16 +8,19 @@ import (
 )
 
 /*
-评分+过滤模型 v7（晋级概率优化版 - 排除一字板后真实数据）
+评分+过滤模型 v9（网格搜索全面优化版）
 
-排除一字板(换手>=3%)后，用zt_records验证的真实晋级率：
-  S: 2板+量比<0.8+涨3 → 晋级45.6%, T日+0.691%, T1+1.561% (n=281, 最优!)
-  A: 2板+量比<0.8+涨2 → 晋级43.8%, T日+0.533%, T1+1.037% (n=381)
-  B: 量比<0.8+涨2     → 晋级37.3%, T日+0.270% (n=721)
-  C: 量比<1.0+涨2     → 晋级33.8%, T日+0.175% (n=1620, 信号最多)
+S级基线: 2板+量比<0.8+涨3+换手>=3% → 晋级45.6%, T日+0.69%, T1+1.56% (n=281)
 
-近200天S级回测实际：晋级37.8%, T日+1.068% (n=82)
-  → 近期市场偏弱导致晋级率低于全量均值，但T日收益反而更好
+网格搜索发现的关键因子（在S级条件下）：
+  板块独苗(sec_cnt=1): 晋级62.2%, T日+2.04%, T1+4.29% (n=74, 最强因子!)
+  独苗+2板: 晋级58.6%, T日+3.31%, T1+5.85%
+  独苗+额3-5亿: 晋级90.9%, T日+3.36%, T1+9.43% (样本少但极强)
+  顶级S+(独苗+温40-100): 晋级64.3%, T日+2.59%, T1+5.18%
+  市场温度40-80: T日+1.44%, T1+2.50% (最优温度区间)
+  市场温度100+: T日-3.06%, T1-2.47% (必须规避)
+  振幅5-8%: T日+1.27%, T1+2.36% (S级中最优)
+  4板+振幅<5%+量<0.5: 晋级52.6%, T1+4.10%
 */
 
 type FilterLevel int
@@ -84,159 +87,190 @@ func PassGridFilterStrict(zt model.ZTRecord, indicator *model.StockIndicator) bo
 	return PassPromoFilter(zt, indicator, FilterS)
 }
 
-// ScorePromoV7 晋级概率导向评分模型
-// 目标：在过滤后的候选池中，进一步排序选出最可能晋级的股票
+// ScorePromoV9 网格搜索优化评分模型
+// 目标：在过滤后的候选池中，排序选出最可能晋级且收益最高的股票
 func ScorePromoV7(sc ScoreContext) float64 {
 	score := 0.0
 
-	// 1. 量比（最强因子，权重30）
-	//    <0.5→30, 0.5-0.8→22, 0.8-1.0→14, 1.0-1.5→6
-	if sc.Indicator != nil {
-		switch {
-		case sc.Indicator.VolRatio < 0.5:
-			score += 30
-		case sc.Indicator.VolRatio < 0.8:
-			score += 22
-		case sc.Indicator.VolRatio < 1.0:
-			score += 14
-		case sc.Indicator.VolRatio < 1.5:
-			score += 6
-		}
+	// 1. 板块独苗（最强因子，权重25）
+	//    独苗: 晋级62.2%, T日+2.04%, T1+4.29% (n=74)
+	//    2-3只: 晋级30.3%, T日-0.83% → 负面
+	//    4-5只: 晋级61.5%, T日+2.16% (板块效应)
+	switch {
+	case sc.SectorZTCount == 1:
+		score += 25
+	case sc.SectorZTCount >= 4 && sc.SectorZTCount <= 5:
+		score += 10
+	case sc.SectorZTCount >= 6:
+		score += 3
+	case sc.SectorZTCount >= 2:
+		score -= 5
 	}
 
-	// 2. 连板高度（权重35，最重要的排序因子）
-	//    4板+T日+1.25%, 3板+0.50%, 2板+0.53%, 首板-0.09%
+	// 2. 连板高度（权重20）
 	switch {
 	case sc.ZT.BoardCount >= 6:
-		score += 35
+		score += 20
 	case sc.ZT.BoardCount == 5:
-		score += 33
+		score += 18
 	case sc.ZT.BoardCount == 4:
-		score += 30
-	case sc.ZT.BoardCount == 3:
-		score += 22
-	case sc.ZT.BoardCount == 2:
 		score += 16
+	case sc.ZT.BoardCount == 3:
+		score += 12
+	case sc.ZT.BoardCount == 2:
+		score += 8
 	default:
-		score += 6
+		score += 3
 	}
 
-	// 3. RSI强度（权重15）
-	//    RSI>90→37%晋级→15, 80-90→29%→12, 70-80→23%→8, <50→惩罚
-	if sc.Indicator != nil && sc.Indicator.RSI6 > 0 {
+	// 3. 量比（权重15）
+	if sc.Indicator != nil {
 		switch {
-		case sc.Indicator.RSI6 >= 90:
+		case sc.Indicator.VolRatio < 0.3:
 			score += 15
-		case sc.Indicator.RSI6 >= 80:
+		case sc.Indicator.VolRatio < 0.5:
 			score += 12
-		case sc.Indicator.RSI6 >= 70:
+		case sc.Indicator.VolRatio < 0.8:
 			score += 8
-		case sc.Indicator.RSI6 >= 50:
+		case sc.Indicator.VolRatio < 1.0:
 			score += 4
-		default:
-			score -= 5
 		}
 	}
 
-	// 4. 连涨天数（权重10）
+	// 4. 振幅因子（权重15）
+	//    2板5-8%最优T1+3.11%, 4板+<3%最优晋级58.1%
+	if sc.Amplitude > 0 {
+		if sc.ZT.BoardCount >= 4 {
+			switch {
+			case sc.Amplitude < 3:
+				score += 12
+			case sc.Amplitude < 5:
+				score += 10
+			case sc.Amplitude < 8:
+				score += 6
+			default:
+				score += 3
+			}
+		} else {
+			switch {
+			case sc.Amplitude < 3:
+				score += 8
+			case sc.Amplitude < 5:
+				score += 6
+			case sc.Amplitude < 8:
+				score += 15
+			case sc.Amplitude < 12:
+				score -= 3
+			default:
+				score -= 2
+			}
+		}
+	}
+
+	// 5. 市场温度（权重12，100+必须规避 T日-3.06%）
+	if sc.Analysis != nil {
+		switch {
+		case sc.Analysis.TotalZTCount >= 100:
+			score -= 12
+		case sc.Analysis.TotalZTCount >= 80:
+			score += 6
+		case sc.Analysis.TotalZTCount >= 60:
+			score += 10
+		case sc.Analysis.TotalZTCount >= 40:
+			score += 12
+		default:
+			score += 2
+		}
+	}
+
+	// 6. 连涨天数（权重8）
 	if sc.Indicator != nil {
 		switch {
 		case sc.Indicator.ConsecutiveUp >= 7:
-			score += 10
-		case sc.Indicator.ConsecutiveUp >= 5:
 			score += 8
+		case sc.Indicator.ConsecutiveUp >= 5:
+			score += 6
 		case sc.Indicator.ConsecutiveUp >= 3:
-			score += 5
+			score += 4
 		}
 	}
 
-	// 5. 换手率（权重8）
-	//    排除一字板后：8-15%晋级46-48%, 3-5%晋级39%, 20%+晋级36%
-	//    适中换手率反而最优
+	// 7. 换手率（权重6）
 	switch {
 	case sc.ZT.Turnover >= 8 && sc.ZT.Turnover < 15:
-		score += 8
-	case sc.ZT.Turnover >= 5 && sc.ZT.Turnover < 8:
 		score += 6
+	case sc.ZT.Turnover >= 5 && sc.ZT.Turnover < 8:
+		score += 5
 	case sc.ZT.Turnover >= 3 && sc.ZT.Turnover < 5:
-		score += 5
-	case sc.ZT.Turnover >= 15 && sc.ZT.Turnover < 20:
 		score += 4
-	default:
-		score += 2
-	}
-
-	// 6. 板块热度（权重5）
-	//    排除一字板后：2-4只板块同涨最佳
-	switch {
-	case sc.SectorZTCount >= 2 && sc.SectorZTCount <= 4:
-		score += 5
-	case sc.SectorZTCount <= 1:
+	case sc.ZT.Turnover >= 15 && sc.ZT.Turnover < 20:
 		score += 3
 	default:
 		score += 1
 	}
 
-	// 7. 市场温度（100+时T日-3%需要减分，但不要大幅改变排序）
-	if sc.Analysis != nil {
-		switch {
-		case sc.Analysis.TotalZTCount >= 100:
-			score -= 5
-		case sc.Analysis.TotalZTCount >= 80:
+	// 8. 成交额（权重8，独苗+小额反而强 独苗<3亿晋级63.2% T日+4.27%）
+	isAlone := sc.SectorZTCount == 1
+	switch {
+	case sc.ZT.Amount >= 500000000:
+		if isAlone {
 			score += 5
-		case sc.Analysis.TotalZTCount >= 50:
-			score += 5
-		case sc.Analysis.TotalZTCount >= 30:
-			score += 2
-		}
-	}
-
-	// 8. 龙虎榜上榜 +3 (24.4% vs 21.1%)
-	if sc.IsOnLHB {
-		score += 3
-	}
-
-	// 9. 主力资金（微弱影响）
-	if sc.Flow != nil {
-		if sc.Flow.MainNet > 0 && sc.Flow.MainNet < 100000000 {
-			score += 2
-		}
-	}
-
-	// 10. 反包加分（首板反包T日+0.663% vs 普通首板+0.263%）
-	if sc.IsFanpack {
-		score += 5
-	}
-
-	// 11. 成交额加分（2-3板中额>=5亿T日+0.64% vs <3亿-0.08%）
-	if sc.ZT.BoardCount >= 2 && sc.ZT.BoardCount <= 3 {
-		if sc.ZT.Amount >= 500000000 {
-			score += 6
-		} else if sc.ZT.Amount >= 300000000 {
-			score += 2
 		} else {
-			score -= 3
+			score += 6
 		}
-	}
-
-	// 12. 振幅因子（S级中：振幅5-8% T日+1.27%/T1+2.36%最优; >=8% T日~0%最差）
-	if sc.Amplitude > 0 {
-		switch {
-		case sc.Amplitude < 5:
+	case sc.ZT.Amount >= 300000000:
+		if isAlone {
 			score += 8
-		case sc.Amplitude < 8:
-			score += 12
-		case sc.Amplitude < 12:
-			score -= 5
-		default:
-			score -= 3
+		} else {
+			score += 3
+		}
+	default:
+		if isAlone {
+			score += 6
+		} else {
+			score -= 2
 		}
 	}
 
-	// 13. BOLL位置（中轨下超跌有反弹动力，上轨上过热风险）
+	// 9. RSI强度（权重6，RSI70-80在S级中晋级53.1%最优）
+	if sc.Indicator != nil && sc.Indicator.RSI6 > 0 {
+		switch {
+		case sc.Indicator.RSI6 >= 70 && sc.Indicator.RSI6 < 80:
+			score += 6
+		case sc.Indicator.RSI6 >= 80:
+			score += 4
+		case sc.Indicator.RSI6 >= 50:
+			score += 3
+		}
+	}
+
+	// 10. MA20偏离度（权重4，偏离30%+反而好 晋级49.5%）
+	if sc.Indicator != nil && sc.Indicator.MA20 > 0 && sc.ClosePrice > 0 {
+		dev := (sc.ClosePrice/sc.Indicator.MA20 - 1) * 100
+		switch {
+		case dev >= 30:
+			score += 4
+		case dev >= 15:
+			score += 1
+		case dev < 5:
+			score += 2
+		}
+	}
+
+	// 11. 龙虎榜上榜 +2
+	if sc.IsOnLHB {
+		score += 2
+	}
+
+	// 12. 反包加分
+	if sc.IsFanpack {
+		score += 4
+	}
+
+	// 13. BOLL位置（权重3）
 	if sc.BollMid > 0 && sc.ClosePrice > 0 {
 		if sc.AboveBollUp {
-			score -= 1
+			score += 0
 		} else if sc.ClosePrice <= sc.BollMid {
 			score += 3
 		}
