@@ -76,9 +76,14 @@ func main() {
 			log.Fatalf("采集板块数据失败: %v", err)
 		}
 	case "flow":
-		log.Println("=== 开始采集个股资金流向 ===")
+		log.Println("=== 开始采集个股资金流向(含历史) ===")
 		if err := c.CollectStockFlow(ctx); err != nil {
 			log.Fatalf("采集资金流向失败: %v", err)
+		}
+	case "sector_flow":
+		log.Println("=== 开始采集板块历史资金流向 ===")
+		if err := c.CollectSectorFlowHistory(ctx); err != nil {
+			log.Fatalf("采集板块历史资金流向失败: %v", err)
 		}
 	case "changes":
 		log.Println("=== 开始采集异动数据 ===")

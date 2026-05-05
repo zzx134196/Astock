@@ -98,20 +98,104 @@ func (c *Collector) CollectSectors(ctx context.Context) error {
 	return nil
 }
 
-// CollectStockFlow 采集个股资金流向
+// CollectStockFlow 采集个股资金流向（当日实时 + 历史）
 func (c *Collector) CollectStockFlow(ctx context.Context) error {
 	log.Println("[采集] 开始采集个股资金流向...")
 
+	// 当日实时数据
 	flows, err := c.em.FetchStockFlow()
 	if err != nil {
 		return err
 	}
-
 	if err := c.store.UpsertStockFlows(ctx, flows); err != nil {
 		return err
 	}
+	log.Printf("[采集] 个股当日资金流向: %d 条", len(flows))
 
-	log.Printf("[采集] 个股资金流向: %d 条", len(flows))
+	// 历史资金流向（主板股票，约120个交易日）
+	log.Println("[采集] 开始采集个股历史资金流向...")
+	stocks, err := c.store.GetMainBoardStocks(ctx)
+	if err != nil {
+		return err
+	}
+
+	total := len(stocks)
+	totalFlows := 0
+	for i, stock := range stocks {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		hf, err := c.em.FetchStockFlowHistory(stock.Code, stock.Market)
+		if err != nil {
+			c.em.Sleep()
+			continue
+		}
+
+		if len(hf) > 0 {
+			if err := c.store.UpsertStockFlows(ctx, hf); err != nil {
+				log.Printf("[采集] 存储历史资金流向失败 %s: %v", stock.Code, err)
+				continue
+			}
+			totalFlows += len(hf)
+		}
+
+		if (i+1)%100 == 0 || i+1 == total {
+			log.Printf("[采集] 个股历史资金流向进度: %d/%d (累计%d条)", i+1, total, totalFlows)
+		}
+
+		c.em.Sleep()
+	}
+
+	log.Printf("[采集] 个股资金流向采集完成，历史共 %d 条", totalFlows)
+	return nil
+}
+
+// CollectSectorFlowHistory 采集板块历史资金流向
+func (c *Collector) CollectSectorFlowHistory(ctx context.Context) error {
+	log.Println("[采集] 开始采集板块历史资金流向...")
+
+	sectors, err := c.em.FetchSectorList("industry")
+	if err != nil {
+		return err
+	}
+	conceptSectors, err := c.em.FetchSectorList("concept")
+	if err == nil {
+		sectors = append(sectors, conceptSectors...)
+	}
+
+	total := len(sectors)
+	totalFlows := 0
+	for i, sector := range sectors {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		hf, err := c.em.FetchSectorFlowHistory(sector.Code)
+		if err != nil {
+			c.em.Sleep()
+			continue
+		}
+
+		if len(hf) > 0 {
+			if err := c.store.UpsertSectorFlows(ctx, hf); err != nil {
+				continue
+			}
+			totalFlows += len(hf)
+		}
+
+		if (i+1)%100 == 0 || i+1 == total {
+			log.Printf("[采集] 板块历史资金流向进度: %d/%d (累计%d条)", i+1, total, totalFlows)
+		}
+
+		c.em.Sleep()
+	}
+
+	log.Printf("[采集] 板块历史资金流向完成，共 %d 条", totalFlows)
 	return nil
 }
 

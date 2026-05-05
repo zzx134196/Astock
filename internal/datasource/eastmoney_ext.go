@@ -276,6 +276,106 @@ func (e *EastMoney) FetchStockFlow() ([]model.StockFlow, error) {
 	return allFlows, nil
 }
 
+// FetchStockFlowHistory 获取个股历史资金流向（约120个交易日）
+func (e *EastMoney) FetchStockFlowHistory(code, market string) ([]model.StockFlow, error) {
+	secID := "0." + code
+	if market == "SH" {
+		secID = "1." + code
+	}
+
+	apiURL := fmt.Sprintf(
+		"https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?secid=%s&lmt=500&klt=101&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65&ut=fa5fd1943c7b386f172d6893dbbd4540",
+		secID)
+
+	body, err := e.doGet(apiURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Data struct {
+			Klines []string `json:"klines"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	var flows []model.StockFlow
+	for _, line := range result.Data.Klines {
+		// 格式: 日期,主力净流入,超大单净流入,散户净流入,超大单净流入,大单净流入,...
+		parts := strings.Split(line, ",")
+		if len(parts) < 6 {
+			continue
+		}
+
+		date, err := time.Parse("2006-01-02", parts[0])
+		if err != nil {
+			continue
+		}
+
+		flows = append(flows, model.StockFlow{
+			Code:    code,
+			Date:    date,
+			MainNet: parseFloat(parts[1]),
+			HugeNet: parseFloat(parts[4]),
+			BigNet:  parseFloat(parts[5]),
+			MidNet:  parseFloat(parts[2]),  // 中单(散户)
+			SmallNet: parseFloat(parts[3]),
+		})
+	}
+
+	return flows, nil
+}
+
+// FetchSectorFlowHistory 获取板块历史资金流向
+func (e *EastMoney) FetchSectorFlowHistory(sectorCode string) ([]model.SectorFlow, error) {
+	apiURL := fmt.Sprintf(
+		"https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?secid=90.%s&lmt=500&klt=101&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65&ut=fa5fd1943c7b386f172d6893dbbd4540",
+		sectorCode)
+
+	body, err := e.doGet(apiURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Data struct {
+			Klines []string `json:"klines"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	var flows []model.SectorFlow
+	for _, line := range result.Data.Klines {
+		parts := strings.Split(line, ",")
+		if len(parts) < 6 {
+			continue
+		}
+
+		date, err := time.Parse("2006-01-02", parts[0])
+		if err != nil {
+			continue
+		}
+
+		flows = append(flows, model.SectorFlow{
+			SectorCode: sectorCode,
+			Date:       date,
+			MainNet:    parseFloat(parts[1]),
+			HugeNet:    parseFloat(parts[4]),
+			BigNet:     parseFloat(parts[5]),
+			MidNet:     parseFloat(parts[2]),
+			SmallNet:   parseFloat(parts[3]),
+		})
+	}
+
+	return flows, nil
+}
+
 // ==================== 异动数据 ====================
 
 // FetchStockChanges 获取盘口异动数据（分页获取全部）
