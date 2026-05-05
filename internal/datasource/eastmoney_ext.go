@@ -119,102 +119,122 @@ func (e *EastMoney) FetchLHBDetail(code, date string) ([]model.LHBDetail, error)
 
 // ==================== 板块概念 ====================
 
-// FetchSectorList 获取行业板块或概念板块列表
+// FetchSectorList 获取行业板块或概念板块列表（分页）
 func (e *EastMoney) FetchSectorList(sectorType string) ([]model.Sector, error) {
-	fs := "m:90+t:2" // 行业
+	fs := "m:90+t:2"
 	if sectorType == "concept" {
 		fs = "m:90+t:3"
 	}
 
-	apiURL := fmt.Sprintf(
-		"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=%s&fields=f12,f14",
-		fs)
+	var allSectors []model.Sector
+	for page := 1; ; page++ {
+		apiURL := fmt.Sprintf(
+			"https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=%s&fields=f12,f14",
+			page, fs)
 
-	body, err := e.doGet(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("获取板块列表失败: %w", err)
+		body, err := e.doGet(apiURL)
+		if err != nil {
+			break
+		}
+
+		var result struct {
+			Data struct {
+				Total int                      `json:"total"`
+				Diff  []map[string]interface{} `json:"diff"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			break
+		}
+		if len(result.Data.Diff) == 0 {
+			break
+		}
+
+		for _, d := range result.Data.Diff {
+			allSectors = append(allSectors, model.Sector{
+				Code:       jsonStr(d, "f12"),
+				Name:       jsonStr(d, "f14"),
+				SectorType: sectorType,
+			})
+		}
+
+		if len(allSectors) >= result.Data.Total || len(result.Data.Diff) < 100 {
+			break
+		}
+		e.Sleep()
 	}
 
-	var result struct {
-		Data struct {
-			Diff []map[string]interface{} `json:"diff"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析板块列表失败: %w", err)
-	}
-
-	var sectors []model.Sector
-	for _, d := range result.Data.Diff {
-		sectors = append(sectors, model.Sector{
-			Code:       jsonStr(d, "f12"),
-			Name:       jsonStr(d, "f14"),
-			SectorType: sectorType,
-		})
-	}
-
-	return sectors, nil
+	return allSectors, nil
 }
 
-// FetchSectorFlow 获取板块资金流向
+// FetchSectorFlow 获取板块资金流向（分页）
 func (e *EastMoney) FetchSectorFlow(sectorType string) ([]model.SectorFlow, error) {
 	fs := "m:90+t:2"
 	if sectorType == "concept" {
 		fs = "m:90+t:3"
 	}
 
-	apiURL := fmt.Sprintf(
-		"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f62&fs=%s&fields=f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87",
-		fs)
-
-	body, err := e.doGet(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("获取板块资金流向失败: %w", err)
-	}
-
-	var result struct {
-		Data struct {
-			Diff []map[string]interface{} `json:"diff"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析板块资金流向失败: %w", err)
-	}
-
 	today := time.Now()
 	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local)
 
-	var flows []model.SectorFlow
-	for _, d := range result.Data.Diff {
-		flows = append(flows, model.SectorFlow{
-			SectorCode: jsonStr(d, "f12"),
-			Date:       todayDate,
-			PctChg:     jsonFloat(d, "f3"),
-			MainNet:    jsonFloat(d, "f62"),
-			HugeNet:    jsonFloat(d, "f66"),
-			BigNet:     jsonFloat(d, "f72"),
-			MidNet:     jsonFloat(d, "f78"),
-			SmallNet:   jsonFloat(d, "f84"),
-		})
+	var allFlows []model.SectorFlow
+	for page := 1; ; page++ {
+		apiURL := fmt.Sprintf(
+			"https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f62&fs=%s&fields=f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87",
+			page, fs)
+
+		body, err := e.doGet(apiURL)
+		if err != nil {
+			break
+		}
+
+		var result struct {
+			Data struct {
+				Total int                      `json:"total"`
+				Diff  []map[string]interface{} `json:"diff"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			break
+		}
+		if len(result.Data.Diff) == 0 {
+			break
+		}
+
+		for _, d := range result.Data.Diff {
+			allFlows = append(allFlows, model.SectorFlow{
+				SectorCode: jsonStr(d, "f12"),
+				Date:       todayDate,
+				PctChg:     jsonFloat(d, "f3"),
+				MainNet:    jsonFloat(d, "f62"),
+				HugeNet:    jsonFloat(d, "f66"),
+				BigNet:     jsonFloat(d, "f72"),
+				MidNet:     jsonFloat(d, "f78"),
+				SmallNet:   jsonFloat(d, "f84"),
+			})
+		}
+
+		if len(allFlows) >= result.Data.Total || len(result.Data.Diff) < 100 {
+			break
+		}
+		e.Sleep()
 	}
 
-	return flows, nil
+	return allFlows, nil
 }
 
 // ==================== 个股资金流向 ====================
 
 // FetchStockFlow 获取个股资金流向(当日)
 func (e *EastMoney) FetchStockFlow() ([]model.StockFlow, error) {
-	apiURL := "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f62&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
+	baseURL := "https://push2.eastmoney.com/api/qt/clist/get?po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f62&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
 
 	var allFlows []model.StockFlow
 	today := time.Now()
 	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local)
 
 	for page := 1; ; page++ {
-		pageURL := fmt.Sprintf("%s&pn=%d&pz=100", apiURL, page)
+		pageURL := fmt.Sprintf("%s&pn=%d&pz=100", baseURL, page)
 		body, err := e.doGet(pageURL)
 		if err != nil {
 			break
@@ -258,31 +278,8 @@ func (e *EastMoney) FetchStockFlow() ([]model.StockFlow, error) {
 
 // ==================== 异动数据 ====================
 
-// FetchStockChanges 获取盘口异动数据
+// FetchStockChanges 获取盘口异动数据（分页获取全部）
 func (e *EastMoney) FetchStockChanges() ([]model.StockChange, error) {
-	apiURL := "https://push2ex.eastmoney.com/getAllStockChanges?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wzchanges&type=8201,8202,8193,4,32,64,8207,8209,8211,8213,8215,8204,8203,8194,8,16,128,8208,8210,8212,8214,8216&pageindex=0&pagesize=200"
-
-	body, err := e.doGet(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("获取异动数据失败: %w", err)
-	}
-
-	var result struct {
-		Data struct {
-			Allstock []struct {
-				C string `json:"c"` // 代码
-				N string `json:"n"` // 名称
-				T string `json:"t"` // 时间
-				D int    `json:"d"` // 类型
-				I string `json:"i"` // 信息
-			} `json:"allstock"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("解析异动数据失败: %w", err)
-	}
-
 	today := time.Now()
 	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local)
 
@@ -296,24 +293,57 @@ func (e *EastMoney) FetchStockChanges() ([]model.StockChange, error) {
 		8215: "60日新高", 8216: "60日新低",
 	}
 
-	var changes []model.StockChange
-	for _, s := range result.Data.Allstock {
-		ct := ""
-		if name, ok := changeTypeMap[s.D]; ok {
-			ct = name
-		} else {
-			ct = fmt.Sprintf("类型%d", s.D)
+	var allChanges []model.StockChange
+	for pageIdx := 0; pageIdx < 50; pageIdx++ {
+		apiURL := fmt.Sprintf(
+			"https://push2ex.eastmoney.com/getAllStockChanges?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wzchanges&type=8201,8202,8193,4,32,64,8207,8209,8211,8213,8215,8204,8203,8194,8,16,128,8208,8210,8212,8214,8216&pageindex=%d&pagesize=200",
+			pageIdx)
+
+		body, err := e.doGet(apiURL)
+		if err != nil {
+			break
 		}
 
-		changes = append(changes, model.StockChange{
-			Code:       s.C,
-			Name:       s.N,
-			Date:       todayDate,
-			ChangeTime: s.T,
-			ChangeType: ct,
-			Info:       s.I,
-		})
+		var raw struct {
+			Data struct {
+				Allstock []map[string]interface{} `json:"allstock"`
+			} `json:"data"`
+		}
+
+		if err := json.Unmarshal(body, &raw); err != nil {
+			break
+		}
+
+		if raw.Data.Allstock == nil || len(raw.Data.Allstock) == 0 {
+			break
+		}
+
+		for _, s := range raw.Data.Allstock {
+			dtype := int(jsonFloat(s, "d"))
+			ct := ""
+			if name, ok := changeTypeMap[dtype]; ok {
+				ct = name
+			} else {
+				ct = fmt.Sprintf("类型%d", dtype)
+			}
+
+			allChanges = append(allChanges, model.StockChange{
+				Code:       jsonStr(s, "c"),
+				Name:       jsonStr(s, "n"),
+				Date:       todayDate,
+				ChangeTime: jsonStr(s, "t"),
+				ChangeType: ct,
+				Info:       jsonStr(s, "i"),
+			})
+		}
+
+		if len(raw.Data.Allstock) < 200 {
+			break
+		}
+		e.Sleep()
 	}
+
+	changes := allChanges
 
 	return changes, nil
 }
