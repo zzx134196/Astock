@@ -113,12 +113,7 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 
 // passCloseFilter 收盘选股过滤条件
 func passCloseFilter(zt model.ZTRecord) bool {
-	// 过滤非主板
 	if len(zt.Code) < 2 {
-		return false
-	}
-	prefix := zt.Code[:2]
-	if prefix != "60" && prefix != "00" {
 		return false
 	}
 
