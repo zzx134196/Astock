@@ -75,7 +75,7 @@ func (e *EastMoney) FetchLHBDetail(code, date string) ([]model.LHBDetail, error)
 
 		params := url.Values{}
 		params.Set("reportName", reportName)
-		params.Set("columns", "SECURITY_CODE,TRADE_DATE,OPERATEDEPT_NAME,BUY_AMT,SELL_AMT,NET_AMT,RANK")
+		params.Set("columns", "SECURITY_CODE,TRADE_DATE,OPERATEDEPT_NAME,BUY,SELL,NET")
 		params.Set("filter", fmt.Sprintf("(SECURITY_CODE=\"%s\")(TRADE_DATE='%s')", code, formatDateDash(date)))
 		params.Set("pageNumber", "1")
 		params.Set("pageSize", "50")
@@ -100,16 +100,16 @@ func (e *EastMoney) FetchLHBDetail(code, date string) ([]model.LHBDetail, error)
 		}
 
 		d, _ := time.Parse("20060102", date)
-		for _, item := range result.Result.Data {
+		for i, item := range result.Result.Data {
 			allDetails = append(allDetails, model.LHBDetail{
 				Code:       code,
 				Date:       d,
 				DeptName:   jsonStr(item, "OPERATEDEPT_NAME"),
 				Side:       side,
-				BuyAmount:  jsonFloat(item, "BUY_AMT"),
-				SellAmount: jsonFloat(item, "SELL_AMT"),
-				NetAmount:  jsonFloat(item, "NET_AMT"),
-				Rank:       int(jsonFloat(item, "RANK")),
+				BuyAmount:  jsonFloat(item, "BUY"),
+				SellAmount: jsonFloat(item, "SELL"),
+				NetAmount:  jsonFloat(item, "NET"),
+				Rank:       i + 1,
 			})
 		}
 	}
