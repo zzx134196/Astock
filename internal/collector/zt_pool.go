@@ -77,9 +77,22 @@ func (c *Collector) calculateZTFromKline(ctx context.Context) error {
 	return nil
 }
 
+// ztThresholdByCode 根据股票代码返回涨停阈值
+// 创业板(300/301)和科创板(688/689)涨跌停20%，主板10%
+func ztThresholdByCode(code string) float64 {
+	if len(code) >= 3 {
+		prefix := code[:3]
+		if prefix == "300" || prefix == "301" || prefix == "688" || prefix == "689" {
+			return 19.7
+		}
+	}
+	return 9.7
+}
+
 // detectZTFromQuotes 从日K线中识别涨停
-func detectZTFromQuotes(stock model.Stock, quotes []model.DailyQuote, threshold float64) []model.ZTRecord {
+func detectZTFromQuotes(stock model.Stock, quotes []model.DailyQuote, _ float64) []model.ZTRecord {
 	var records []model.ZTRecord
+	threshold := ztThresholdByCode(stock.Code)
 
 	for _, q := range quotes {
 		if q.PctChg >= threshold {

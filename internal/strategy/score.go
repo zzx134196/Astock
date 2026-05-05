@@ -40,7 +40,11 @@ type ScoreContext struct {
 	LHBNetAmount  float64
 	HotRank       int
 	ConceptCount  int
-	IsFanpack     bool // 反包涨停（之前涨停过+回调后再涨停）
+	IsFanpack     bool    // 反包涨停（之前涨停过+回调后再涨停）
+	Amplitude     float64 // 涨停日振幅(%)
+	AboveBollUp   bool    // 收盘价在BOLL上轨之上
+	BollMid       float64 // BOLL中轨价
+	ClosePrice    float64 // 涨停日收盘价
 }
 
 // PassPromoFilter 基于晋级概率的过滤器（分级）
@@ -52,19 +56,19 @@ func PassPromoFilter(zt model.ZTRecord, indicator *model.StockIndicator, level F
 	if zt.Name != "" && (zt.Name[0] == '*' || containsST(zt.Name)) {
 		return false
 	}
+	// 排除一字板/极低换手（换手<3%通常无法买入）
+	if zt.Turnover < 3 {
+		return false
+	}
 
 	switch level {
 	case FilterS:
-		// 2板+ + 量比<0.8 + 连涨>=3 → T日+0.691%, 晋级48.5%, n=281
 		return zt.BoardCount >= 2 && indicator.VolRatio < 0.8 && indicator.ConsecutiveUp >= 3
 	case FilterA:
-		// 2板+ + 量比<0.8 + 连涨>=2 → T日+0.533%, 晋级45.0%, n=381
 		return zt.BoardCount >= 2 && indicator.VolRatio < 0.8 && indicator.ConsecutiveUp >= 2
 	case FilterB:
-		// 不限板数 + 量比<0.8 + 连涨>=2 → T日+0.270%, 晋级45.0%, n=721
 		return indicator.VolRatio < 0.8 && indicator.ConsecutiveUp >= 2
 	case FilterC:
-		// 不限板数 + 量比<1.0 + 连涨>=2 → T日+0.175%, 晋级39.9%, n=1620 (最多信号)
 		return indicator.VolRatio < 1.0 && indicator.ConsecutiveUp >= 2
 	}
 	return false
@@ -173,16 +177,15 @@ func ScorePromoV7(sc ScoreContext) float64 {
 		score += 1
 	}
 
-	// 7. 市场温度（辅助，权重5）
-	//    80-120涨停→27.6%最佳, >120→9.7%极差
+	// 7. 市场温度（100+时T日-3%需要减分，但不要大幅改变排序）
 	if sc.Analysis != nil {
 		switch {
-		case sc.Analysis.TotalZTCount >= 120:
+		case sc.Analysis.TotalZTCount >= 100:
 			score -= 5
 		case sc.Analysis.TotalZTCount >= 80:
 			score += 5
 		case sc.Analysis.TotalZTCount >= 50:
-			score += 3
+			score += 5
 		case sc.Analysis.TotalZTCount >= 30:
 			score += 2
 		}
@@ -213,6 +216,29 @@ func ScorePromoV7(sc ScoreContext) float64 {
 			score += 2
 		} else {
 			score -= 3
+		}
+	}
+
+	// 12. 振幅因子（S级中：振幅5-8% T日+1.27%/T1+2.36%最优; >=8% T日~0%最差）
+	if sc.Amplitude > 0 {
+		switch {
+		case sc.Amplitude < 5:
+			score += 8
+		case sc.Amplitude < 8:
+			score += 12
+		case sc.Amplitude < 12:
+			score -= 5
+		default:
+			score -= 3
+		}
+	}
+
+	// 13. BOLL位置（中轨下超跌有反弹动力，上轨上过热风险）
+	if sc.BollMid > 0 && sc.ClosePrice > 0 {
+		if sc.AboveBollUp {
+			score -= 1
+		} else if sc.ClosePrice <= sc.BollMid {
+			score += 3
 		}
 	}
 
@@ -302,6 +328,20 @@ func BuildScoreContext(ctx context.Context, s *store.Store, zt model.ZTRecord, a
 				sc.IsFanpack = true
 			}
 		}
+	}
+
+	// 涨停日K线细节：振幅、BOLL位置
+	var amplitude float64
+	var closePrice float64
+	s.DB().QueryRowContext(ctx,
+		`SELECT amplitude, close FROM daily_quotes WHERE code = $1 AND date = $2`,
+		zt.Code, date).Scan(&amplitude, &closePrice)
+	sc.Amplitude = amplitude
+	sc.ClosePrice = closePrice
+
+	if sc.Indicator != nil && sc.Indicator.BollUpper > 0 && sc.Indicator.BollMid > 0 {
+		sc.BollMid = sc.Indicator.BollMid
+		sc.AboveBollUp = closePrice > sc.Indicator.BollUpper
 	}
 
 	return sc
