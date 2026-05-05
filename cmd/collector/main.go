@@ -35,6 +35,9 @@ func main() {
 	if err := db.MigrateExt(); err != nil {
 		log.Fatalf("扩展表迁移失败: %v", err)
 	}
+	if err := db.MigrateExtra(); err != nil {
+		log.Fatalf("Extra表迁移失败: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -99,6 +102,16 @@ func main() {
 		log.Println("=== 开始采集扩展涨停池 ===")
 		if err := c.CollectZTPoolExt(ctx); err != nil {
 			log.Fatalf("采集扩展池失败: %v", err)
+		}
+	case "concepts":
+		log.Println("=== 开始采集个股概念标签 ===")
+		if err := c.CollectStockConcepts(ctx); err != nil {
+			log.Fatalf("采集概念标签失败: %v", err)
+		}
+	case "hot_rank":
+		log.Println("=== 开始采集人气排行榜 ===")
+		if err := c.CollectHotRank(ctx); err != nil {
+			log.Fatalf("采集人气排行失败: %v", err)
 		}
 	case "extend":
 		log.Println("=== 开始采集所有扩展数据 ===")

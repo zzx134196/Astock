@@ -55,6 +55,22 @@ func main() {
 		if err := a.CalculateIndicators(ctx); err != nil {
 			log.Fatalf("技术指标计算失败: %v", err)
 		}
+	case "premium":
+		log.Println("=== 计算涨停次日溢价 ===")
+		if err := db.MigrateExtra(); err != nil {
+			log.Fatalf("Extra表迁移失败: %v", err)
+		}
+		if err := a.CalculateZTPremium(ctx); err != nil {
+			log.Fatalf("溢价计算失败: %v", err)
+		}
+	case "sentiment_detail":
+		log.Println("=== 计算每日情绪明细 ===")
+		if err := db.MigrateExtra(); err != nil {
+			log.Fatalf("Extra表迁移失败: %v", err)
+		}
+		if err := a.CalculateDailySentiment(ctx); err != nil {
+			log.Fatalf("情绪明细计算失败: %v", err)
+		}
 	case "backtest":
 		log.Println("=== 策略回测 ===")
 		startDate, _ := time.Parse("20060102", cfg.DataSource.HistoryStartDate)
