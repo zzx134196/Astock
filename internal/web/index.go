@@ -204,6 +204,7 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
       </div>
 
       <div id="d_ztlist" class="sub-content">
+        <div class="date-picker"><label>日期</label><select id="ztDateSelect" onchange="loadZTByDate()"></select></div>
         <div class="glass"><h3><span class="dot"></span>涨停个股 <span style="font-weight:400;color:var(--text3);font-size:10px;margin-left:4px" id="ztDateLabel"></span></h3><div class="table-wrap" id="ztTableWrap"></div></div>
       </div>
 
@@ -226,6 +227,7 @@ tbody tr:hover{background:rgba(0,0,0,0.02);}
       </div>
 
       <div id="d_lhb" class="sub-content">
+        <div class="date-picker"><label>日期</label><select id="lhbDateSelect" onchange="loadLHBByDate()"></select></div>
         <div class="glass"><h3><span class="dot"></span>龙虎榜 <span style="font-weight:400;color:var(--text3);font-size:10px;margin-left:4px" id="lhbDateLabel"></span></h3><div class="table-wrap" id="lhbTableWrap"></div></div>
       </div>
 
@@ -447,14 +449,16 @@ async function loadSentiment(){
   makeChart('maxBoardChart',{type:'line',data:{labels,datasets:[{label:'最高连板',data:sent.map(d=>d.max_board),borderColor:'#ef4444',borderWidth:2,pointRadius:1.5,tension:0.3,fill:{target:'origin',above:'rgba(239,68,68,0.04)'}}]},options:co()});
   makeChart('failRateChart',{type:'bar',data:{labels,datasets:[{label:'炸板',data:sent.map(d=>d.fail_count),backgroundColor:'rgba(245,158,11,0.3)',borderColor:'#f59e0b',borderWidth:1,borderRadius:2},{label:'跌停',data:sent.map(d=>d.dt_count||0),backgroundColor:'rgba(16,185,129,0.2)',borderColor:'#10b981',borderWidth:1,borderRadius:2}]},options:co()});
 }
-async function loadZTList(){const data=await api('/api/zt/today');document.getElementById('ztDateLabel').textContent=data.date+' · '+data.count+'只';if(!data.records||!data.records.length){document.getElementById('ztTableWrap').innerHTML='<div class="empty">暂无数据</div>';return;}
+async function initZTDates(){const dates=await api('/api/zt/dates');const sel=document.getElementById('ztDateSelect');sel.innerHTML='';if(dates&&dates.length){dates.forEach(d=>{sel.innerHTML+='<option value="'+d+'">'+d+'</option>';});loadZTByDate();}}
+async function loadZTByDate(){const date=document.getElementById('ztDateSelect').value;const data=await api('/api/zt/today?date='+date);document.getElementById('ztDateLabel').textContent=data.date+' · '+data.count+'只';if(!data.records||!data.records.length){document.getElementById('ztTableWrap').innerHTML='<div class="empty">暂无数据</div>';return;}
   let h='<table><thead><tr><th>代码</th><th>名称</th><th>涨幅</th><th>收盘</th><th>连板</th><th>封板</th><th>炸板</th><th>换手</th><th>成交额</th><th>行业</th></tr></thead><tbody>';data.records.forEach(r=>{const bt=r.board_count>=3?'tag-red':r.board_count==2?'tag-amber':'tag-blue';h+='<tr onclick="openStock(\''+r.code+'\')"><td><b>'+r.code+'</b></td><td>'+r.name+'</td><td class="up">'+f(r.pct_chg,2)+'%</td><td>'+f(r.close,2)+'</td><td><span class="tag '+bt+'">'+r.board_count+'板</span></td><td>'+(r.first_seal_time||'-')+'</td><td>'+(r.fail_count||0)+'</td><td>'+f(r.turnover)+'%</td><td>'+fW(r.amount)+'</td><td><span class="tag tag-purple">'+(r.industry||'')+'</span></td></tr>';});
   h+='</tbody></table>';document.getElementById('ztTableWrap').innerHTML=h;}
 async function loadPremium(){const data=await api('/api/premium');if(!data||!data.length)return;const items=data.filter(d=>d.board_count>=1&&d.board_count<=8);
   document.getElementById('premiumCards').innerHTML=items.map(d=>'<div class="stat" style="text-align:center"><div style="font-size:22px;font-weight:800;color:var(--red)">'+d.board_count+'</div><div style="font-size:10px;color:var(--text3)">板</div><div style="font-size:14px;font-weight:700;margin-top:4px" class="'+cls(d.avg_open_premium)+'">'+f(d.avg_open_premium,2)+'%</div><div style="font-size:9px;color:var(--text2)">溢价 · '+d.sample_count+'样本</div><div style="font-size:9px;color:var(--text2)">正溢价 '+f(d.win_rate)+'%</div></div>').join('');
   makeChart('premiumChart',{type:'bar',data:{labels:items.map(d=>d.board_count+'板'),datasets:[{label:'开盘',data:items.map(d=>d.avg_open_premium),backgroundColor:'rgba(239,68,68,0.3)',borderRadius:4},{label:'收盘',data:items.map(d=>d.avg_close_premium),backgroundColor:'rgba(59,130,246,0.3)',borderRadius:4},{label:'最高',data:items.map(d=>d.avg_max_premium),backgroundColor:'rgba(139,92,246,0.2)',borderRadius:4}]},options:co()});
   makeChart('nextZTChart',{type:'bar',data:{labels:items.map(d=>d.board_count+'板'),datasets:[{label:'连板率%',data:items.map(d=>d.next_zt_rate),backgroundColor:'rgba(239,68,68,0.3)',borderRadius:4}]},options:co()});}
-async function loadLHB(){const data=await api('/api/lhb');document.getElementById('lhbDateLabel').textContent=(data.date||'')+' · '+((data.records||[]).length)+'只';if(!data.records||!data.records.length){document.getElementById('lhbTableWrap').innerHTML='<div class="empty">暂无数据</div>';return;}
+async function initLHBDates(){const dates=await api('/api/lhb/dates');const sel=document.getElementById('lhbDateSelect');sel.innerHTML='';if(dates&&dates.length){dates.forEach(d=>{sel.innerHTML+='<option value="'+d+'">'+d+'</option>';});loadLHBByDate();}}
+async function loadLHBByDate(){const date=document.getElementById('lhbDateSelect').value;const data=await api('/api/lhb?date='+date);document.getElementById('lhbDateLabel').textContent=(data.date||'')+' · '+((data.records||[]).length)+'只';if(!data.records||!data.records.length){document.getElementById('lhbTableWrap').innerHTML='<div class="empty">暂无数据</div>';return;}
   let h='<table><thead><tr><th>代码</th><th>名称</th><th>涨幅</th><th>净买入</th><th>买入</th><th>卖出</th><th>原因</th></tr></thead><tbody>';data.records.forEach(r=>{h+='<tr onclick="openStock(\''+r.code+'\')"><td><b>'+r.code+'</b></td><td>'+r.name+'</td><td class="'+cls(r.pct_chg)+'">'+f(r.pct_chg,2)+'%</td><td class="'+cls(r.net_amount)+'"><b>'+fW(r.net_amount)+'</b></td><td class="up">'+fW(r.buy_amount)+'</td><td class="down">'+fW(r.sell_amount)+'</td><td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+r.reason+'</td></tr>';});
   h+='</tbody></table>';document.getElementById('lhbTableWrap').innerHTML=h;}
 async function initFlowDates(){const dates=await api('/api/flow/dates');const sel=document.getElementById('flowDateSelect');sel.innerHTML='';if(dates&&dates.length){dates.forEach(d=>{sel.innerHTML+='<option value="'+d+'">'+d+'</option>';});loadFlowByDate();}}
@@ -530,7 +534,7 @@ function drawCandlestick(cid,quotes,indicators){
 function co(){return{responsive:true,plugins:{legend:{labels:{color:'#94a3b8',font:{size:10,family:'Inter'},boxWidth:10}},tooltip:{mode:'index',intersect:false,backgroundColor:'rgba(30,41,59,0.9)',titleFont:{size:11},bodyFont:{size:11},padding:8,cornerRadius:8}},scales:{x:ao(),y:ao()},interaction:{mode:'index',intersect:false}};}
 function ao(){return{ticks:{color:'#94a3b8',font:{size:9,family:'Inter'},maxRotation:0},grid:{color:'rgba(0,0,0,0.03)'}};}
 
-(async()=>{await loadOverview();loadSentiment();loadZTList();loadPremium();loadLHB();initFlowDates();loadSignals();loadHotRank();loadBacktest();loadDBStats();})();
+(async()=>{await loadOverview();loadSentiment();initZTDates();loadPremium();initLHBDates();initFlowDates();loadSignals();loadHotRank();loadBacktest();loadDBStats();})();
 </script>
 </body>
 </html>` + ""

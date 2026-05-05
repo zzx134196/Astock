@@ -42,6 +42,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/lhb", s.handleLHB)
 	s.mux.HandleFunc("/api/flow/top", s.handleFlowTop)
 	s.mux.HandleFunc("/api/flow/dates", s.handleFlowDates)
+	s.mux.HandleFunc("/api/zt/dates", s.handleZTDates)
+	s.mux.HandleFunc("/api/lhb/dates", s.handleLHBDates)
 	s.mux.HandleFunc("/api/stats", s.handleDBStats)
 	s.mux.HandleFunc("/api/stock", s.handleStockDetail)
 	s.mux.HandleFunc("/api/stock/search", s.handleStockSearch)
@@ -421,6 +423,42 @@ func (s *Server) handleFlowDates(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	var dates []string
+	for rows.Next() {
+		var d time.Time
+		rows.Scan(&d)
+		dates = append(dates, d.Format("2006-01-02"))
+	}
+	jsonResponse(w, dates)
+}
+
+func (s *Server) handleZTDates(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT DISTINCT date FROM zt_records ORDER BY date DESC LIMIT 120`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+	var dates []string
+	for rows.Next() {
+		var d time.Time
+		rows.Scan(&d)
+		dates = append(dates, d.Format("2006-01-02"))
+	}
+	jsonResponse(w, dates)
+}
+
+func (s *Server) handleLHBDates(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT DISTINCT date FROM lhb_records ORDER BY date DESC LIMIT 120`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
 	var dates []string
 	for rows.Next() {
 		var d time.Time
