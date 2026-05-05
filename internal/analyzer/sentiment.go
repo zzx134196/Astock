@@ -39,24 +39,30 @@ func (a *Analyzer) AnalyzeSentiment(ctx context.Context) error {
 	})
 
 	// 计算移动平均和情绪得分
-	window := 5 // 5日移动平均
+	window := 5
 	ztCounts := make([]float64, len(analyses))
 	for i, a := range analyses {
 		ztCounts[i] = float64(a.TotalZTCount)
 	}
 	ma := movingAverage(ztCounts, window)
 
-	// 计算全局统计值用于分位数判定
-	allCounts := make([]float64, len(ztCounts))
-	copy(allCounts, ztCounts)
-	sort.Float64s(allCounts)
-
-	p20 := percentile(allCounts, 20)
-	p40 := percentile(allCounts, 40)
-	p60 := percentile(allCounts, 60)
-	p80 := percentile(allCounts, 80)
-
+	// 使用滚动窗口分位数（避免未来数据泄漏）
+	// 每个交易日只用它之前（含当日）的数据计算分位数
+	rollingWindow := 120 // 约半年的交易日
 	for i := range analyses {
+		start := 0
+		if i-rollingWindow+1 > 0 {
+			start = i - rollingWindow + 1
+		}
+		windowCounts := make([]float64, i-start+1)
+		copy(windowCounts, ztCounts[start:i+1])
+		sort.Float64s(windowCounts)
+
+		p20 := percentile(windowCounts, 20)
+		p40 := percentile(windowCounts, 40)
+		p60 := percentile(windowCounts, 60)
+		p80 := percentile(windowCounts, 80)
+
 		score := calculateSentimentScore(analyses[i], ma[i], p20, p40, p60, p80)
 		analyses[i].SentimentScore = score
 		analyses[i].SentimentPhase = determineSentimentPhase(score, i, analyses)

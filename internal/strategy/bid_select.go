@@ -62,9 +62,9 @@ func (s *Selector) BidSelect(ctx context.Context) ([]Signal, error) {
 			continue
 		}
 
-		// 基础评分(基于昨日涨停数据)
-		sc := sectorCount[zt.Industry]
-		baseScore := ScoreCandidate(zt, analysis, sc)
+		// 使用V2多维度评分（与收盘选股一致）
+		scoreCtx := BuildScoreContext(ctx, s.store, zt, analysis, sectorCount[zt.Industry])
+		baseScore := ScoreCandidateV2(scoreCtx)
 
 		// 竞价加减分
 		bidAdj := scoreBidData(zt)
@@ -74,7 +74,6 @@ func (s *Selector) BidSelect(ctx context.Context) ([]Signal, error) {
 			continue
 		}
 
-		// 竞价买入价 = 涨停价(昨日收盘已涨停)
 		buyPrice := zt.Close
 		stopLossPrice := buyPrice * (1 - s.cfg.Strategy.DefaultStopLoss/100)
 

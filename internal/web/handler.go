@@ -237,37 +237,80 @@ func (s *Server) handleBacktestResult(w http.ResponseWriter, r *http.Request) {
 
 	totalPnl := 0.0
 	winCount := 0
+	var totalProfit, totalLoss float64
+	var maxWin, maxLoss float64
 	var cumPnls []map[string]interface{}
 	cumPnl := 0.0
+	peak := 0.0
+	maxDD := 0.0
+
+	var tradeDetails []map[string]interface{}
 
 	for _, t := range trades {
 		totalPnl += t.PnLPct
 		cumPnl += t.PnLPct
+		if cumPnl > peak {
+			peak = cumPnl
+		}
+		dd := peak - cumPnl
+		if dd > maxDD {
+			maxDD = dd
+		}
+
 		if t.PnLPct > 0 {
 			winCount++
+			totalProfit += t.PnLPct
+			if t.PnLPct > maxWin {
+				maxWin = t.PnLPct
+			}
+		} else {
+			totalLoss += -t.PnLPct
+			if t.PnLPct < maxLoss {
+				maxLoss = t.PnLPct
+			}
 		}
 		cumPnls = append(cumPnls, map[string]interface{}{
 			"date":    t.BuyDate.Format("2006-01-02"),
-			"code":    t.Code,
-			"name":    t.Name,
-			"pnl_pct": t.PnLPct,
 			"cum_pnl": cumPnl,
+		})
+
+		sellDate := ""
+		if t.SellDate != nil {
+			sellDate = t.SellDate.Format("2006-01-02")
+		}
+		tradeDetails = append(tradeDetails, map[string]interface{}{
+			"buy_date":   t.BuyDate.Format("2006-01-02"),
+			"sell_date":  sellDate,
+			"code":       t.Code,
+			"name":       t.Name,
+			"buy_price":  t.BuyPrice,
+			"sell_price": t.SellPrice,
+			"pnl_pct":    t.PnLPct,
 		})
 	}
 
 	winRate := 0.0
 	avgPnl := 0.0
+	profitRatio := 0.0
 	if len(trades) > 0 {
 		winRate = float64(winCount) / float64(len(trades)) * 100
 		avgPnl = totalPnl / float64(len(trades))
 	}
+	if totalLoss > 0 {
+		profitRatio = totalProfit / totalLoss
+	}
 
 	jsonResponse(w, map[string]interface{}{
-		"total_trades": len(trades),
-		"win_rate":     winRate,
-		"total_pnl":    totalPnl,
-		"avg_pnl":      avgPnl,
-		"curve":        cumPnls,
+		"total_trades":  len(trades),
+		"win_rate":      winRate,
+		"total_pnl":     totalPnl,
+		"avg_pnl":       avgPnl,
+		"max_drawdown":  maxDD,
+		"max_win":       maxWin,
+		"max_loss":      maxLoss,
+		"profit_ratio":  profitRatio,
+		"curve":         cumPnls,
+		"trades":        tradeDetails,
 	})
 }
 

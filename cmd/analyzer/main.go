@@ -75,11 +75,14 @@ func main() {
 		log.Println("=== 策略回测 ===")
 		startDate, _ := time.Parse("20060102", cfg.DataSource.HistoryStartDate)
 		bt := strategy.NewBacktester(db, strategy.BacktestConfig{
-			StartDate:  startDate,
-			EndDate:    time.Now(),
-			MaxPicks:   cfg.Strategy.MaxPicks,
-			StopLoss:   cfg.Strategy.DefaultStopLoss,
-			HoldDays:   3,
+			StartDate:      startDate,
+			EndDate:        time.Now(),
+			MaxPicks:       3,
+			StopLoss:       5,
+			HoldDays:       1,
+			InitialCapital: 1000000,
+			PositionPct:    25,
+			Mode:           "排板",
 		})
 		if _, err := bt.Run(ctx); err != nil {
 			log.Fatalf("回测失败: %v", err)

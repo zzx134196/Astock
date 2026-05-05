@@ -15,7 +15,6 @@ import (
 // 严格不使用未来数据：只使用T日及之前的数据
 func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 	today := time.Now()
-	// 如果是周末则回退到周五
 	for today.Weekday() == time.Saturday || today.Weekday() == time.Sunday {
 		today = today.AddDate(0, 0, -1)
 	}
@@ -23,7 +22,6 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 
 	log.Printf("[选股] 收盘选股，基准日期: %s", todayDate.Format("2006-01-02"))
 
-	// 获取今日涨停记录
 	todayZT, err := s.store.GetZTRecordsByDate(ctx, todayDate)
 	if err != nil {
 		return nil, fmt.Errorf("获取今日涨停记录失败: %w", err)
@@ -36,14 +34,12 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 
 	log.Printf("[选股] 今日涨停 %d 只", len(todayZT))
 
-	// 获取今日情绪分析
 	analyses, _ := s.store.GetZTAnalysisRange(ctx, todayDate, todayDate)
 	var analysis *model.ZTAnalysis
 	if len(analyses) > 0 {
 		analysis = &analyses[0]
 	}
 
-	// 计算板块涨停数量
 	sectorCount := make(map[string]int)
 	for _, r := range todayZT {
 		if r.Industry != "" {
@@ -51,7 +47,6 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 		}
 	}
 
-	// 对每只涨停股评分（使用V2多维度评分）
 	var candidates []Signal
 	for _, zt := range todayZT {
 		if !passCloseFilter(zt) {
@@ -61,15 +56,19 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 		sc := BuildScoreContext(ctx, s.store, zt, analysis, sectorCount[zt.Industry])
 		score := ScoreCandidateV2(sc)
 
-		stopLossPrice := zt.Close * (1 - s.cfg.Strategy.DefaultStopLoss/100)
+		// 分数阈值过滤
+		if score < 50 {
+			continue
+		}
 
+		stopLossPrice := zt.Close * (1 - s.cfg.Strategy.DefaultStopLoss/100)
 		reason := buildCloseReason(zt, analysis, sectorCount[zt.Industry])
 
 		candidates = append(candidates, Signal{
 			Code:       zt.Code,
 			Name:       zt.Name,
 			Score:      score,
-			BuyPrice:   zt.Close, // 以涨停价为参考
+			BuyPrice:   zt.Close,
 			StopLoss:   stopLossPrice,
 			Reason:     reason,
 			BoardCount: zt.BoardCount,
@@ -77,18 +76,15 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 		})
 	}
 
-	// 按评分排序
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].Score > candidates[j].Score
 	})
 
-	// 取TopN
 	maxPicks := s.cfg.Strategy.MaxPicks
 	if len(candidates) > maxPicks {
 		candidates = candidates[:maxPicks]
 	}
 
-	// 存储信号到数据库
 	for _, c := range candidates {
 		sig := model.StrategySignal{
 			Code:       c.Code,
@@ -111,22 +107,65 @@ func (s *Selector) CloseSelect(ctx context.Context) ([]Signal, error) {
 	return candidates, nil
 }
 
-// passCloseFilter 收盘选股过滤条件
+// passCloseFilter 收盘选股过滤条件（数据驱动优化）
 func passCloseFilter(zt model.ZTRecord) bool {
 	if len(zt.Code) < 2 {
 		return false
 	}
 
-	// 过滤ST
 	if len(zt.Name) > 0 && (zt.Name[0] == '*' || containsST(zt.Name)) {
 		return false
 	}
 
-	// 过滤成交额过小(小于5000万)
-	if zt.Amount > 0 && zt.Amount < 50000000 {
+	// 成交额 >= 1亿（过滤流动性不足的票）
+	if zt.Amount > 0 && zt.Amount < 100000000 {
 		return false
 	}
 
+	// === 核心过滤：基于溢价数据的统计结论 ===
+
+	// 首板直接过滤：18%晋级率，开盘买入后平均溢价很低
+	// 涨停板策略的核心alpha来自连板，而不是首板
+	if zt.BoardCount <= 1 {
+		return false
+	}
+
+	if zt.BoardCount >= 2 {
+		// 连板股核心：低换手 = 高溢价
+		// 换手>20%的连板次日溢价接近0，不做
+		if zt.Turnover > 20 {
+			return false
+		}
+		// 高位板(4+)允许稍高换手但不能太散
+		if zt.BoardCount >= 4 && zt.Turnover > 25 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// passBoardQueueFilter 排板策略过滤（涨停板收盘价排队买入，次日卖出）
+// 排板策略的选股逻辑不同于追板：关注封板强度而非连板高度
+func passBoardQueueFilter(zt model.ZTRecord) bool {
+	if len(zt.Code) < 2 {
+		return false
+	}
+	if len(zt.Name) > 0 && (zt.Name[0] == '*' || containsST(zt.Name)) {
+		return false
+	}
+	// 成交额 >= 5000万
+	if zt.Amount > 0 && zt.Amount < 50000000 {
+		return false
+	}
+	// 连板优先(2板+溢价显著更高)
+	if zt.BoardCount < 2 {
+		return false
+	}
+	// 高换手连板溢价很差
+	if zt.Turnover > 20 {
+		return false
+	}
 	return true
 }
 
